@@ -1,2 +1,14 @@
 # macOS
 .DS_Store
+
+# Dependencies
+node_modules
+
+# Build output
+dist
+
+# Agent tooling state (also globally ignored, listed here so
+# tools like oxfmt that only read the local .gitignore skip them)
+.omc
+.omo
+.codegraph
