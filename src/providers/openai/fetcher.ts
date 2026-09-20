@@ -12,14 +12,20 @@ const RPC_TIMEOUT_MS = 15_000;
 
 export async function detect(deps: ProviderDeps, _signal: AbortSignal): Promise<DetectionResult> {
   try {
-    const raw = deps.exec("which codex", { encoding: "utf8" });
+    const raw = deps.exec("which codex", { encoding: "utf8", stdio: "pipe" });
     const path = String(raw).trim();
-    if (path.length > 0) {
-      return { available: true };
+    if (path.length === 0) {
+      return { available: false, reason: "Codex CLI not found in PATH" };
     }
-    return { available: false, reason: "Codex CLI not found in PATH" };
   } catch {
     return { available: false, reason: "Codex CLI not found in PATH" };
+  }
+
+  try {
+    deps.exec("codex --version", { encoding: "utf8", timeout: 5_000, stdio: "pipe" });
+    return { available: true };
+  } catch {
+    return { available: false, reason: "Codex CLI found but not executable" };
   }
 }
 

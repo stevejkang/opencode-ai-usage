@@ -132,6 +132,44 @@ describe("detect", () => {
       reason: "Codex CLI not found in PATH",
     });
   });
+
+  it("returns unavailable when which codex succeeds but codex --version throws ENOENT", async () => {
+    const execMock = vi
+      .fn()
+      .mockImplementationOnce(() => "/usr/local/bin/codex\n")
+      .mockImplementationOnce(() => {
+        const err = new Error("spawn codex ENOENT") as NodeJS.ErrnoException;
+        err.code = "ENOENT";
+        throw err;
+      });
+    const deps = createFakeDeps({
+      exec: execMock as unknown as ProviderDeps["exec"],
+    });
+    const result = await detect(deps, AbortSignal.abort());
+    expect(result).toEqual({
+      available: false,
+      reason: "Codex CLI found but not executable",
+    });
+    expect(execMock).toHaveBeenCalledTimes(2);
+  });
+
+  it("returns available when both which codex and codex --version succeed", async () => {
+    const execMock = vi
+      .fn()
+      .mockImplementationOnce(() => "/usr/local/bin/codex\n")
+      .mockImplementationOnce(() => "codex-cli 0.21.0\n");
+    const deps = createFakeDeps({
+      exec: execMock as unknown as ProviderDeps["exec"],
+    });
+    const result = await detect(deps, AbortSignal.abort());
+    expect(result).toEqual({ available: true });
+    expect(execMock).toHaveBeenCalledTimes(2);
+    expect(execMock).toHaveBeenNthCalledWith(
+      2,
+      expect.stringContaining("codex"),
+      expect.any(Object),
+    );
+  });
 });
 
 describe("fetchUsage", () => {
