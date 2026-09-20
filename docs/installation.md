@@ -50,21 +50,22 @@ All options are optional. Defaults shown:
     "showRemaining": false,
     "providers": {
       "claude": { "refreshInterval": 60, "headerColor": "#E07A3A" },
-      "openai": { "refreshInterval": 30, "headerColor": "#10A37F" }
+      "openai": { "refreshInterval": 30, "headerColor": "#10A37F" },
+      "opencode-go": { "refreshInterval": 60, "headerColor": "#FDFCFC" }
     }
   }
 ]
 ```
 
-| Option                           | Default   | Description                                                 |
-| -------------------------------- | --------- | ----------------------------------------------------------- |
-| `disabledProviders`              | `[]`      | Provider IDs to skip entirely, e.g. `["openai"]`            |
-| `displayMode`                    | `"mixed"` | `"mixed"`, `"text"`, or `"bar"` (see below)                 |
-| `showRemaining`                  | `false`   | Show remaining capacity instead of used (see below)         |
-| `providers.<id>.refreshInterval` |           | Seconds between data refreshes (claude: `60`, openai: `30`) |
-| `providers.<id>.headerColor`     |           | Section header color (claude: `#E07A3A`, openai: `#10A37F`) |
+| Option                           | Default   | Description                                                                         |
+| -------------------------------- | --------- | ----------------------------------------------------------------------------------- |
+| `disabledProviders`              | `[]`      | Provider IDs to skip entirely, e.g. `["openai"]`                                    |
+| `displayMode`                    | `"mixed"` | `"mixed"`, `"text"`, or `"bar"` (see below)                                         |
+| `showRemaining`                  | `false`   | Show remaining capacity instead of used (see below)                                 |
+| `providers.<id>.refreshInterval` |           | Seconds between data refreshes (claude: `60`, openai: `30`, opencode-go: `60`)      |
+| `providers.<id>.headerColor`     |           | Section header color (claude: `#E07A3A`, openai: `#10A37F`, opencode-go: `#FDFCFC`) |
 
-Provider IDs currently available: `claude`, `openai`, etc.
+Provider IDs currently available: `claude`, `openai`, `opencode-go`.
 
 #### `displayMode`
 
@@ -125,10 +126,11 @@ During initial load:
 
 ## Supported Providers
 
-| Provider       | ID       | Requirements                                                                  |
-| -------------- | -------- | ----------------------------------------------------------------------------- |
-| Claude         | `claude` | Logged in via Claude CLI, OpenCode auth, or `CLAUDE_CODE_OAUTH_TOKEN` env var |
-| OpenAI (Codex) | `openai` | [Codex CLI](https://openai.com/codex) installed and logged in (`codex login`) |
+| Provider       | ID            | Requirements                                                                                 |
+| -------------- | ------------- | -------------------------------------------------------------------------------------------- |
+| Claude         | `claude`      | Logged in via Claude CLI, OpenCode auth, or `CLAUDE_CODE_OAUTH_TOKEN` env var                |
+| OpenAI (Codex) | `openai`      | [Codex CLI](https://openai.com/codex) installed and logged in (`codex login`)                |
+| OpenCode Go    | `opencode-go` | [OpenCode Go](https://opencode.ai) subscription active, connected via `/connect` in OpenCode |
 
 ## Troubleshooting
 

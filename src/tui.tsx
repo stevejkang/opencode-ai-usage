@@ -27,6 +27,7 @@ import {
 } from "./format";
 import { createClaudeProvider } from "./providers/claude";
 import { createOpenAIProvider } from "./providers/openai";
+import { createOpenCodeGoProvider } from "./providers/opencode-go";
 
 import { computeDisplayPercent, computeSectionVisibility } from "./tui-logic";
 
@@ -314,7 +315,11 @@ const tui: TuiPlugin = async (api, rawOptions, _meta) => {
   };
 
   const cache = createCacheStore();
-  const registry = createRegistry([createClaudeProvider(), createOpenAIProvider()]);
+  const registry = createRegistry([
+    createClaudeProvider(),
+    createOpenAIProvider(),
+    createOpenCodeGoProvider(),
+  ]);
   const enabled = registry.getEnabled(options.disabledProviders);
 
   const controller = new AbortController();

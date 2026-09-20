@@ -19,6 +19,7 @@ import {
 } from "../../src/types";
 import { createClaudeProvider } from "../../src/providers/claude/index";
 import { createOpenAIProvider } from "../../src/providers/openai/index";
+import { createOpenCodeGoProvider } from "../../src/providers/opencode-go/index";
 
 const FROZEN_NOW = 1_700_000_000_000;
 
@@ -97,19 +98,27 @@ describe("multi-provider integration", () => {
   });
 
   describe("registry with multiple providers", () => {
-    it("getAll returns both providers registered via real factories", () => {
-      const registry = createRegistry([createClaudeProvider(), createOpenAIProvider()]);
+    it("getAll returns all providers registered via real factories", () => {
+      const registry = createRegistry([
+        createClaudeProvider(),
+        createOpenAIProvider(),
+        createOpenCodeGoProvider(),
+      ]);
       const all = registry.getAll();
 
-      expect(all).toHaveLength(2);
-      expect(all.map((p) => p.id)).toEqual(["claude", "openai"]);
+      expect(all).toHaveLength(3);
+      expect(all.map((p) => p.id)).toEqual(["claude", "openai", "opencode-go"]);
     });
 
     it("getEnabled returns all when no providers are disabled", () => {
-      const registry = createRegistry([createClaudeProvider(), createOpenAIProvider()]);
+      const registry = createRegistry([
+        createClaudeProvider(),
+        createOpenAIProvider(),
+        createOpenCodeGoProvider(),
+      ]);
 
-      expect(registry.getEnabled()).toHaveLength(2);
-      expect(registry.getEnabled([])).toHaveLength(2);
+      expect(registry.getEnabled()).toHaveLength(3);
+      expect(registry.getEnabled([])).toHaveLength(3);
     });
   });
 
