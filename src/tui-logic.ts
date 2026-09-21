@@ -26,8 +26,18 @@ export function computeStaleText(
 ): string | null {
   const ageMs = now - lastFetchedAt;
   if (ageMs <= 2 * refreshIntervalMs) return null;
-  const mins = Math.floor(ageMs / 60_000);
-  return mins < 1 ? "updated <1m ago" : `updated ${mins}m ago`;
+
+  const totalMinutes = Math.floor(ageMs / 60_000);
+  if (totalMinutes < 1) return "updated <1m ago";
+
+  const totalHours = Math.floor(totalMinutes / 60);
+  const days = Math.floor(totalHours / 24);
+  const hours = totalHours % 24;
+  const minutes = totalMinutes % 60;
+
+  if (days > 0) return `updated ${days}d ${hours}h ago`;
+  if (totalHours > 0) return `updated ${totalHours}h ${minutes}m ago`;
+  return `updated ${totalMinutes}m ago`;
 }
 
 export function computeDisplayPercent(

@@ -137,6 +137,48 @@ describe("computeStaleText", () => {
   it("returns large minute count for very old data", () => {
     expect(computeStaleText(BASE_TIME - 3_000_000, INTERVAL_MS, BASE_TIME)).toBe("updated 50m ago");
   });
+
+  it("formats hours and minutes for 90-minute age", () => {
+    expect(computeStaleText(BASE_TIME - 90 * 60_000, INTERVAL_MS, BASE_TIME)).toBe(
+      "updated 1h 30m ago",
+    );
+  });
+
+  it("formats hours with zero minutes", () => {
+    expect(computeStaleText(BASE_TIME - 2 * 3_600_000, INTERVAL_MS, BASE_TIME)).toBe(
+      "updated 2h 0m ago",
+    );
+  });
+
+  it("formats at exactly 1 hour boundary", () => {
+    expect(computeStaleText(BASE_TIME - 3_600_000, INTERVAL_MS, BASE_TIME)).toBe(
+      "updated 1h 0m ago",
+    );
+  });
+
+  it("formats days and hours for 25-hour age", () => {
+    expect(computeStaleText(BASE_TIME - 25 * 3_600_000, INTERVAL_MS, BASE_TIME)).toBe(
+      "updated 1d 1h ago",
+    );
+  });
+
+  it("formats days with zero hours", () => {
+    expect(computeStaleText(BASE_TIME - 48 * 3_600_000, INTERVAL_MS, BASE_TIME)).toBe(
+      "updated 2d 0h ago",
+    );
+  });
+
+  it("formats at exactly 1 day boundary", () => {
+    expect(computeStaleText(BASE_TIME - 24 * 3_600_000, INTERVAL_MS, BASE_TIME)).toBe(
+      "updated 1d 0h ago",
+    );
+  });
+
+  it("formats 780m as 13h 0m", () => {
+    expect(computeStaleText(BASE_TIME - 780 * 60_000, INTERVAL_MS, BASE_TIME)).toBe(
+      "updated 13h 0m ago",
+    );
+  });
 });
 
 describe("computeDisplayPercent", () => {
