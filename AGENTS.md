@@ -31,7 +31,7 @@ Before committing or opening a PR, verify the following:
 1. **Conventions followed** — all changes comply with the guidelines defined in this file
 2. **Tests added** — appropriate unit tests are written for new or changed logic
 3. **Commit discipline** — commits follow the rules in Commit & PR Rules (meaningful units, signed, proper messages)
-4. **CI expected to pass** — all checks that run in CI workflows (build, lint, typecheck, tests) pass locally before pushing
+4. **CI expected to pass** — all checks that run in CI workflows (build, lint, typecheck, format, tests, etc.) pass locally before pushing
 
 ### 3. Respect .gitignore
 
