@@ -52,7 +52,7 @@ describe("fetchOAuthUsage", () => {
       seven_day: { utilization: 20, resets_at: null },
       seven_day_sonnet: null,
       seven_day_opus: null,
-      seven_day_oauth_apps: null,
+      seven_day_oauth_apps: { utilization: 7, resets_at: null },
       seven_day_cowork: null,
       extra_usage: { is_enabled: true, monthly_limit: 100 },
       limits: [{ kind: "session", used_percentage: 45, is_active: true }],
@@ -60,6 +60,7 @@ describe("fetchOAuthUsage", () => {
 
     const result = await fetchOAuthUsage("tok", fetcher, signal);
     expect(result.fiveHour?.utilization).toBe(10);
+    expect(result.sevenDayOAuthApps?.utilization).toBe(7);
     expect(result.extraUsage?.isEnabled).toBe(true);
   });
 
@@ -79,6 +80,28 @@ describe("fetchOAuthUsage", () => {
     expect(result.fiveHour?.utilization).toBe(55);
     expect(result.sevenDayCowork?.utilization).toBe(18);
     expect(result.limits?.[0]?.percent).toBe(30);
+  });
+
+  it("maps limit scope model display_name and defaults missing percent to 0", async () => {
+    const fetcher = mockFetch(200, {
+      five_hour: null,
+      seven_day: null,
+      seven_day_sonnet: null,
+      seven_day_opus: null,
+      seven_day_oauth_apps: null,
+      seven_day_cowork: null,
+      extra_usage: null,
+      limits: [
+        {
+          kind: "weekly_scoped",
+          scope: { model: { id: "fable", display_name: "Fable" }, surface: null },
+        },
+      ],
+    });
+
+    const result = await fetchOAuthUsage("tok", fetcher, signal);
+    expect(result.limits?.[0]?.scope?.model?.displayName).toBe("Fable");
+    expect(result.limits?.[0]?.percent).toBe(0);
   });
 
   it("throws ProviderFetchError with retryAfterS on 429", async () => {

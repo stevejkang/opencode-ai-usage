@@ -1,10 +1,60 @@
 import { ProviderFetchError } from "../../types";
-import { KNOWN_WINDOW_KEYS } from "./fetcher";
-import type { OAuthUsageResponse, ProfileResponse } from "./types";
+import type {
+  LimitEntry,
+  OAuthExtraUsage,
+  OAuthUsageResponse,
+  OAuthUsageWindow,
+  ProfileResponse,
+} from "./types";
 
 const BASE_URL = "https://api.anthropic.com";
 const BETA_HEADER = "oauth-2025-04-20";
 const USER_AGENT = "claude-code/2.1.0";
+
+interface ApiUsageWindow {
+  utilization?: number | null;
+  used_percentage?: number | null;
+  resets_at?: string | null;
+}
+
+interface ApiExtraUsage {
+  is_enabled?: boolean | null;
+  monthly_limit?: number | null;
+  used_credits?: number | null;
+  utilization?: number | null;
+  currency?: string | null;
+}
+
+interface ApiLimitEntry {
+  kind?: string | null;
+  group?: string | null;
+  percent?: number | null;
+  used_percentage?: number | null;
+  severity?: string | null;
+  resets_at?: string | null;
+  scope?: {
+    model?: { id?: string | null; display_name?: string | null } | null;
+    surface?: string | null;
+  } | null;
+  is_active?: boolean | null;
+}
+
+interface UsageApiResponse {
+  five_hour?: ApiUsageWindow | null;
+  seven_day?: ApiUsageWindow | null;
+  seven_day_sonnet?: ApiUsageWindow | null;
+  seven_day_opus?: ApiUsageWindow | null;
+  seven_day_oauth_apps?: ApiUsageWindow | null;
+  seven_day_cowork?: ApiUsageWindow | null;
+  extra_usage?: ApiExtraUsage | null;
+  limits?: ApiLimitEntry[] | null;
+}
+
+interface ProfileApiResponse {
+  account?: { email?: string | null } | null;
+  organization?: { organization_type?: string | null } | null;
+  email?: string | null;
+}
 
 function makeHeaders(accessToken: string): Record<string, string> {
   return {
@@ -16,46 +66,61 @@ function makeHeaders(accessToken: string): Record<string, string> {
   };
 }
 
-function snakeToCamel(obj: unknown): unknown {
-  if (Array.isArray(obj)) {
-    return obj.map(snakeToCamel);
-  }
-  if (obj !== null && typeof obj === "object") {
-    const result: Record<string, unknown> = {};
-    for (const [key, value] of Object.entries(obj as Record<string, unknown>)) {
-      const camelKey = key.replace(/_([a-z])/g, (_, c: string) => c.toUpperCase());
-      result[camelKey] = snakeToCamel(value);
-    }
-    return result;
-  }
-  return obj;
+function mapWindow(w: ApiUsageWindow | null | undefined): OAuthUsageWindow | null {
+  if (!w) return null;
+  return {
+    utilization: w.utilization ?? w.used_percentage ?? null,
+    resetsAt: w.resets_at ?? null,
+  };
 }
 
-function normalizeWindow(w: unknown): unknown {
-  if (w === null || typeof w !== "object") return w;
-  const obj = w as Record<string, unknown>;
-  if (obj.utilization === undefined && typeof obj.usedPercentage === "number") {
-    obj.utilization = obj.usedPercentage;
-  }
-  return obj;
+function mapExtraUsage(e: ApiExtraUsage | null | undefined): OAuthExtraUsage | null {
+  if (!e) return null;
+  return {
+    isEnabled: e.is_enabled ?? null,
+    monthlyLimit: e.monthly_limit ?? null,
+    usedCredits: e.used_credits ?? null,
+    utilization: e.utilization ?? null,
+    currency: e.currency ?? null,
+  };
 }
 
-function normalizeUsageResponse(raw: Record<string, unknown>): OAuthUsageResponse {
-  for (const key of KNOWN_WINDOW_KEYS) {
-    if (raw[key]) raw[key] = normalizeWindow(raw[key]);
-  }
-  if (Array.isArray(raw.limits)) {
-    raw.limits = (raw.limits as Record<string, unknown>[]).map((entry) => {
-      if (entry.percent === undefined && typeof entry.usedPercentage === "number") {
-        entry.percent = entry.usedPercentage;
-      }
-      return entry;
-    });
-  }
-  return raw as unknown as OAuthUsageResponse;
+function mapLimitEntry(entry: ApiLimitEntry): LimitEntry {
+  return {
+    kind: entry.kind ?? "",
+    group: entry.group ?? "",
+    percent: entry.percent ?? entry.used_percentage ?? 0,
+    severity: entry.severity ?? "",
+    resetsAt: entry.resets_at ?? null,
+    scope: entry.scope
+      ? {
+          model: entry.scope.model
+            ? {
+                id: entry.scope.model.id ?? null,
+                displayName: entry.scope.model.display_name ?? "",
+              }
+            : null,
+          surface: entry.scope.surface ?? null,
+        }
+      : null,
+    isActive: entry.is_active ?? false,
+  };
 }
 
-function resolveOrgPlan(orgType: unknown): string | null {
+function mapUsageResponse(raw: UsageApiResponse): OAuthUsageResponse {
+  return {
+    fiveHour: mapWindow(raw.five_hour),
+    sevenDay: mapWindow(raw.seven_day),
+    sevenDaySonnet: mapWindow(raw.seven_day_sonnet),
+    sevenDayOpus: mapWindow(raw.seven_day_opus),
+    sevenDayOAuthApps: mapWindow(raw.seven_day_oauth_apps),
+    sevenDayCowork: mapWindow(raw.seven_day_cowork),
+    extraUsage: mapExtraUsage(raw.extra_usage),
+    limits: raw.limits?.map(mapLimitEntry) ?? null,
+  };
+}
+
+function resolveOrgPlan(orgType: string | null | undefined): string | null {
   switch (orgType) {
     case "claude_max":
       return "Max";
@@ -107,8 +172,8 @@ export async function fetchOAuthUsage(
     throwHttpError(response.status, response.headers);
   }
 
-  const raw = (await response.json()) as Record<string, unknown>;
-  return normalizeUsageResponse(snakeToCamel(raw) as Record<string, unknown>);
+  const raw = (await response.json()) as UsageApiResponse;
+  return mapUsageResponse(raw);
 }
 
 /** Fetch profile data from the Anthropic OAuth API. */
@@ -129,21 +194,17 @@ export async function fetchOAuthProfile(
 
   if (!response.ok) return null;
 
-  const raw = (await response.json()) as Record<string, unknown>;
-  const converted = snakeToCamel(raw) as Record<string, unknown>;
-
-  const account = converted.account as Record<string, unknown> | undefined;
-  const org = converted.organization as Record<string, unknown> | undefined;
+  const data = (await response.json()) as ProfileApiResponse;
 
   const email =
-    typeof account?.email === "string"
-      ? account.email
-      : typeof converted.email === "string"
-        ? converted.email
+    typeof data.account?.email === "string"
+      ? data.account.email
+      : typeof data.email === "string"
+        ? data.email
         : null;
   if (!email) return null;
 
-  const plan = resolveOrgPlan(org?.organizationType);
+  const plan = resolveOrgPlan(data.organization?.organization_type);
 
   return { email, plan };
 }

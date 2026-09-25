@@ -31,8 +31,6 @@ export const WINDOW_LABEL_MAP: Record<string, string> = {
   sevenDayCowork: "Cowork",
 };
 
-export const KNOWN_WINDOW_KEYS: readonly string[] = Object.keys(WINDOW_LABEL_MAP);
-
 export function limitLabel(kind: string, scope: LimitScope | null | undefined): string {
   if (scope?.model?.displayName) return scope.model.displayName;
   const labels: Record<string, string> = {
