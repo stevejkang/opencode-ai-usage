@@ -40,6 +40,15 @@ function delay(ms: number, signal: AbortSignal): Promise<void> {
 
 const BACKOFF_DELAYS = [200, 400, 800];
 const DEFAULT_RETRY_AFTER_S = 60;
+const MAX_JITTER_MS = 10_000;
+const JITTER_RATIO = 0.1;
+const MAX_RATE_LIMIT_BACKOFF_MS = 10 * 60 * 1000;
+
+function rateLimitRetryAfterMs(error: unknown): number | null {
+  if (!(error instanceof ProviderFetchError)) return null;
+  if (error.info.kind !== "http" || error.info.status !== 429) return null;
+  return (error.info.retryAfterS ?? DEFAULT_RETRY_AFTER_S) * 1000;
+}
 
 async function fetchWithRetry(
   provider: ProviderDefinition<unknown>,
@@ -52,12 +61,6 @@ async function fetchWithRetry(
     } catch (error) {
       if (signal.aborted) throw error;
       if (!(error instanceof ProviderFetchError)) throw error;
-
-      if (error.info.kind === "http" && error.info.status === 429) {
-        const waitS = error.info.retryAfterS ?? DEFAULT_RETRY_AFTER_S;
-        await delay(waitS * 1000, signal);
-        return await provider.fetch(deps, signal);
-      }
 
       const isRetryable =
         error.info.kind === "network" || (error.info.kind === "http" && error.info.status >= 500);
@@ -73,37 +76,71 @@ async function fetchWithRetry(
   throw new Error("Unreachable: fetch retry loop exited without result");
 }
 
+/**
+ * Runs the fetch loop for one provider. Several OpenCode processes share the cache, so
+ * each cycle first adopts fresher data written by another process and honors a
+ * cache-wide 429 cooldown before fetching; only one process per interval should hit
+ * the provider API.
+ */
 export function createRefreshLoop(options: RefreshLoopOptions): void {
   const { provider, deps, cache, signal, intervalMs, setState } = options;
 
   let lastKnownAccountKey: string = UNKNOWN_ACCOUNT_KEY;
   let lastGoodState: RefreshState | null = null;
+  let rateLimitStreak = 0;
 
-  const seed = cache.readLatest(provider.id);
-  if (seed) {
-    lastKnownAccountKey = seed.accountKey;
-    const seeded: RefreshState = {
-      windows: seed.entry.windows,
-      profile: seed.entry.profile,
-      extras: seed.entry.extras,
+  const jitterMs = () => Math.random() * Math.min(MAX_JITTER_MS, intervalMs * JITTER_RATIO);
+
+  const adopt = (accountKey: string, entry: AccountCache) => {
+    lastKnownAccountKey = accountKey;
+    const state: RefreshState = {
+      windows: entry.windows,
+      profile: entry.profile,
+      extras: entry.extras,
       error: null,
-      lastFetchedAt: seed.entry.timestamp,
+      lastFetchedAt: entry.timestamp,
     };
-    lastGoodState = seeded;
-    setState(seeded);
-  }
+    lastGoodState = state;
+    setState(state);
+  };
 
-  const scheduleNext = () => {
+  const readFreshPeer = () => {
+    const latest = cache.readLatest(provider.id);
+    if (!latest) return null;
+    const isNewer = latest.entry.timestamp > (lastGoodState?.lastFetchedAt ?? -Infinity);
+    const isFresh = deps.now() - latest.entry.timestamp < intervalMs;
+    return isNewer && isFresh ? latest : null;
+  };
+
+  const scheduleIn = (ms: number) => {
     if (signal.aborted) return;
-    const timer = setTimeout(() => {
-      void cycle();
-    }, intervalMs);
+    const timer = setTimeout(
+      () => {
+        void cycle();
+      },
+      Math.max(0, ms) + jitterMs(),
+    );
     const onAbort = () => clearTimeout(timer);
     signal.addEventListener("abort", onAbort, { once: true });
   };
 
   const cycle = async () => {
     if (signal.aborted) return;
+
+    const peer = readFreshPeer();
+    if (peer) {
+      adopt(peer.accountKey, peer.entry);
+      scheduleIn(intervalMs);
+      return;
+    }
+
+    const cooldownUntil = cache.getRateLimitedUntil(provider.id);
+    if (cooldownUntil !== null) {
+      scheduleIn(cooldownUntil - deps.now());
+      return;
+    }
+
+    let nextDelayMs = intervalMs;
 
     try {
       const result = await fetchWithRetry(provider, deps, signal);
@@ -124,6 +161,7 @@ export function createRefreshLoop(options: RefreshLoopOptions): void {
       };
 
       await cache.write(provider.id, accountKey, entry);
+      rateLimitStreak = 0;
 
       const good: RefreshState = {
         windows: result.windows,
@@ -136,6 +174,21 @@ export function createRefreshLoop(options: RefreshLoopOptions): void {
       setState(good);
     } catch (error) {
       if (signal.aborted) return;
+
+      const retryAfterMs = rateLimitRetryAfterMs(error);
+      if (retryAfterMs !== null) {
+        rateLimitStreak += 1;
+        await cache.setRateLimitedUntil(provider.id, deps.now() + retryAfterMs);
+        const backoffMs = Math.min(intervalMs * 2 ** rateLimitStreak, MAX_RATE_LIMIT_BACKOFF_MS);
+        nextDelayMs = Math.max(retryAfterMs, backoffMs);
+      }
+
+      const peerAfterFailure = readFreshPeer();
+      if (peerAfterFailure) {
+        adopt(peerAfterFailure.accountKey, peerAfterFailure.entry);
+        scheduleIn(nextDelayMs);
+        return;
+      }
 
       const errorMessage = error instanceof Error ? error.message : String(error);
 
@@ -164,8 +217,18 @@ export function createRefreshLoop(options: RefreshLoopOptions): void {
       }
     }
 
-    scheduleNext();
+    scheduleIn(nextDelayMs);
   };
+
+  const seed = cache.readLatest(provider.id);
+  if (seed) {
+    adopt(seed.accountKey, seed.entry);
+    const seedAgeMs = deps.now() - seed.entry.timestamp;
+    if (seedAgeMs < intervalMs) {
+      scheduleIn(intervalMs - seedAgeMs);
+      return;
+    }
+  }
 
   void cycle();
 }

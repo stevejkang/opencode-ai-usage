@@ -85,6 +85,7 @@ export interface CacheSchema {
 
 export interface ProviderCache {
   accounts: Record<string, AccountCache>;
+  rateLimitedUntil?: number;
 }
 
 export interface AccountCache {
@@ -102,6 +103,8 @@ export interface CacheStore {
   write(providerId: string, accountKey: string, entry: AccountCache): Promise<void>;
   getAge(providerId: string, accountKey: string): number | null;
   migrateUnknown(providerId: string, newAccountKey: string): Promise<void>;
+  getRateLimitedUntil(providerId: string): number | null;
+  setRateLimitedUntil(providerId: string, until: number): Promise<void>;
 }
 
 export interface RefreshState {

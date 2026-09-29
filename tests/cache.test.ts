@@ -256,4 +256,37 @@ describe("createCacheStore", () => {
       expect(result!.entry).toEqual(entry);
     });
   });
+
+  describe("rate-limit cooldown", () => {
+    it("returns the recorded cooldown while it is in the future", async () => {
+      let currentTime = frozenNow;
+      const store = createCacheStore({ cacheDir: tmpDir, now: () => currentTime });
+
+      await store.setRateLimitedUntil("claude", frozenNow + 60_000);
+
+      expect(store.getRateLimitedUntil("claude")).toBe(frozenNow + 60_000);
+      currentTime = frozenNow + 60_000;
+      expect(store.getRateLimitedUntil("claude")).toBeNull();
+    });
+
+    it("keeps the later cooldown when a shorter one is recorded", async () => {
+      const store = createCacheStore({ cacheDir: tmpDir, now: () => frozenNow });
+
+      await store.setRateLimitedUntil("claude", frozenNow + 240_000);
+      await store.setRateLimitedUntil("claude", frozenNow + 60_000);
+
+      expect(store.getRateLimitedUntil("claude")).toBe(frozenNow + 240_000);
+    });
+
+    it("survives account writes and pruning of a provider with no accounts", async () => {
+      const store = createCacheStore({ cacheDir: tmpDir, now: () => frozenNow });
+
+      await store.setRateLimitedUntil("claude", frozenNow + 60_000);
+      await store.write("openai", "a@test.com", makeEntry({ timestamp: frozenNow }));
+      await store.write("claude", "b@test.com", makeEntry({ timestamp: frozenNow }));
+
+      expect(store.getRateLimitedUntil("claude")).toBe(frozenNow + 60_000);
+      expect(store.getRateLimitedUntil("openai")).toBeNull();
+    });
+  });
 });

@@ -90,10 +90,12 @@ describe("multi-provider integration", () => {
 
   beforeEach(async () => {
     tmpDir = await mkdtemp(join(tmpdir(), "integ-"));
+    vi.spyOn(Math, "random").mockReturnValue(0);
   });
 
   afterEach(async () => {
     vi.useRealTimers();
+    vi.restoreAllMocks();
     await rm(tmpDir, { recursive: true, force: true });
   });
 
@@ -288,7 +290,7 @@ describe("multi-provider integration", () => {
       const staleWindows = makeWindows(25);
 
       await cache.write("claude", UNKNOWN_ACCOUNT_KEY, {
-        timestamp: FROZEN_NOW - 30_000,
+        timestamp: FROZEN_NOW - 90_000,
         windows: staleWindows,
         profile: { email: "stale@test.com" },
         extras: null,
@@ -580,10 +582,10 @@ describe("multi-provider integration", () => {
       expect((result as { available: false; reason: string }).reason).toEqual(expect.any(String));
     });
 
-    it("429 with Retry-After delays next fetch by at least retryAfterS", async () => {
+    it("429 keeps last data with an error and backs off the next fetch past retryAfterS", async () => {
       vi.useFakeTimers({ now: FROZEN_NOW });
 
-      const cache = createCacheStore({ cacheDir: tmpDir, now: () => FROZEN_NOW });
+      const cache = createCacheStore({ cacheDir: tmpDir, now: () => Date.now() });
       const retryAfterS = 5;
       let fetchCount = 0;
 
@@ -611,25 +613,63 @@ describe("multi-provider integration", () => {
 
       createRefreshLoop({
         provider: makeFakeProvider("test", fetchFn),
-        deps: makeFakeDeps(),
+        deps: makeFakeDeps({ now: () => Date.now() }),
         cache,
         signal: ac.signal,
         intervalMs: 60_000,
         setState: tracker.setState,
       });
 
-      await vi.advanceTimersByTimeAsync(0);
-      expect(fetchCount).toBe(1);
+      const limited = await tracker.waitFor(1);
+      expect(limited.error).toBe("rate limited");
+      expect(cache.getRateLimitedUntil("test")).toBe(FROZEN_NOW + retryAfterS * 1000);
 
-      await vi.advanceTimersByTimeAsync(retryAfterS * 1000 - 1);
+      await vi.advanceTimersByTimeAsync(120_000 - 1);
       expect(fetchCount).toBe(1);
 
       await vi.advanceTimersByTimeAsync(1);
-      await tracker.waitFor(1);
+      const recovered = await tracker.waitFor(2);
 
       expect(fetchCount).toBe(2);
-      expect(tracker.calls[0].error).toBeNull();
-      expect(tracker.calls[0].windows).toEqual(makeWindows(50));
+      expect(recovered.error).toBeNull();
+      expect(recovered.windows).toEqual(makeWindows(50));
+
+      ac.abort();
+    });
+
+    it("consecutive 429s double the fetch interval", async () => {
+      vi.useFakeTimers({ now: FROZEN_NOW });
+
+      const cache = createCacheStore({ cacheDir: tmpDir, now: () => Date.now() });
+      const fetchFn = vi
+        .fn<ProviderDefinition["fetch"]>()
+        .mockRejectedValue(
+          new ProviderFetchError("rate limited", { kind: "http", status: 429, retryAfterS: 1 }),
+        );
+      const tracker = createStateTracker();
+      const ac = new AbortController();
+
+      createRefreshLoop({
+        provider: makeFakeProvider("test", fetchFn),
+        deps: makeFakeDeps({ now: () => Date.now() }),
+        cache,
+        signal: ac.signal,
+        intervalMs: 10_000,
+        setState: tracker.setState,
+      });
+
+      await tracker.waitFor(1);
+      await vi.advanceTimersByTimeAsync(20_000 - 1);
+      expect(fetchFn).toHaveBeenCalledTimes(1);
+      await vi.advanceTimersByTimeAsync(1);
+      await tracker.waitFor(2);
+      expect(fetchFn).toHaveBeenCalledTimes(2);
+
+      await vi.advanceTimersByTimeAsync(40_000 - 1);
+      expect(fetchFn).toHaveBeenCalledTimes(2);
+      await vi.advanceTimersByTimeAsync(1);
+      await tracker.waitFor(3);
+      expect(fetchFn).toHaveBeenCalledTimes(3);
 
       ac.abort();
     });
@@ -896,6 +936,111 @@ describe("multi-provider integration", () => {
       expect(seeded.profile).toEqual(cachedProfile);
       expect(seeded.extras).toEqual({ credits: 50 });
       expect(seeded.lastFetchedAt).toBe(FROZEN_NOW - 15_000);
+    });
+  });
+
+  describe("coordination between processes sharing the cache", () => {
+    function successFetch(percent: number) {
+      return vi.fn<ProviderDefinition["fetch"]>().mockResolvedValue({
+        accountKey: "user@x.com",
+        windows: makeWindows(percent),
+        profile: { email: "user@x.com" },
+        extras: null,
+      });
+    }
+
+    it("a process started with fresh cache data waits and then adopts the peer's refresh", async () => {
+      vi.useFakeTimers({ now: FROZEN_NOW });
+      vi.spyOn(Math, "random").mockReturnValueOnce(0).mockReturnValueOnce(1).mockReturnValue(0);
+
+      const cache = createCacheStore({ cacheDir: tmpDir, now: () => Date.now() });
+      const deps = makeFakeDeps({ now: () => Date.now() });
+      const fetchA = successFetch(10);
+      const fetchB = successFetch(99);
+      const trackerA = createStateTracker();
+      const trackerB = createStateTracker();
+      const ac = new AbortController();
+
+      createRefreshLoop({
+        provider: makeFakeProvider("claude", fetchA),
+        deps,
+        cache,
+        signal: ac.signal,
+        intervalMs: 60_000,
+        setState: trackerA.setState,
+      });
+      await trackerA.waitFor(1);
+
+      createRefreshLoop({
+        provider: makeFakeProvider("claude", fetchB),
+        deps,
+        cache,
+        signal: ac.signal,
+        intervalMs: 60_000,
+        setState: trackerB.setState,
+      });
+      const seeded = await trackerB.waitFor(1);
+      expect(seeded.lastFetchedAt).toBe(FROZEN_NOW);
+
+      await vi.advanceTimersByTimeAsync(60_000);
+      await trackerA.waitFor(2);
+      expect(fetchA).toHaveBeenCalledTimes(2);
+
+      await vi.advanceTimersByTimeAsync(6_000);
+      const adopted = await trackerB.waitFor(2);
+
+      expect(fetchB).not.toHaveBeenCalled();
+      expect(adopted.error).toBeNull();
+      expect(adopted.windows).toEqual(makeWindows(10));
+      expect(adopted.lastFetchedAt).toBe(FROZEN_NOW + 60_000);
+
+      ac.abort();
+    });
+
+    it("a 429 cooldown recorded by one process holds back fetches from the others", async () => {
+      vi.useFakeTimers({ now: FROZEN_NOW });
+
+      const cache = createCacheStore({ cacheDir: tmpDir, now: () => Date.now() });
+      const deps = makeFakeDeps({ now: () => Date.now() });
+      const fetchA = vi
+        .fn<ProviderDefinition["fetch"]>()
+        .mockRejectedValue(
+          new ProviderFetchError("rate limited", { kind: "http", status: 429, retryAfterS: 300 }),
+        );
+      const fetchB = successFetch(20);
+      const trackerA = createStateTracker();
+      const trackerB = createStateTracker();
+      const ac = new AbortController();
+
+      createRefreshLoop({
+        provider: makeFakeProvider("claude", fetchA),
+        deps,
+        cache,
+        signal: ac.signal,
+        intervalMs: 200_000,
+        setState: trackerA.setState,
+      });
+      await trackerA.waitFor(1);
+
+      createRefreshLoop({
+        provider: makeFakeProvider("claude", fetchB),
+        deps,
+        cache,
+        signal: ac.signal,
+        intervalMs: 60_000,
+        setState: trackerB.setState,
+      });
+
+      await vi.advanceTimersByTimeAsync(300_000 - 1);
+      expect(fetchB).not.toHaveBeenCalled();
+
+      await vi.advanceTimersByTimeAsync(1);
+      const state = await trackerB.waitFor(1);
+
+      expect(fetchB).toHaveBeenCalledTimes(1);
+      expect(state.windows).toEqual(makeWindows(20));
+
+      ac.abort();
     });
   });
 });

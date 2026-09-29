@@ -61,7 +61,8 @@ function pruneExpired(schema: CacheSchema, currentTime: number): void {
         delete provider.accounts[key];
       }
     }
-    if (Object.keys(provider.accounts).length === 0) {
+    const coolingDown = (provider.rateLimitedUntil ?? 0) > currentTime;
+    if (Object.keys(provider.accounts).length === 0 && !coolingDown) {
       delete schema.providers[pid];
     }
   }
@@ -159,5 +160,28 @@ export function createCacheStore(deps: CacheStoreDeps = {}): CacheStore {
     });
   }
 
-  return { read, readLatest, write, getAge, migrateUnknown };
+  function getRateLimitedUntil(providerId: string): number | null {
+    const until = readSchemaSync(cachePath).providers[providerId]?.rateLimitedUntil;
+    return until !== undefined && until > now() ? until : null;
+  }
+
+  function setRateLimitedUntil(providerId: string, until: number): Promise<void> {
+    return enqueue(async () => {
+      const schema = await readSchemaAsync(cachePath);
+      pruneExpired(schema, now());
+      const provider = (schema.providers[providerId] ??= { accounts: {} });
+      provider.rateLimitedUntil = Math.max(provider.rateLimitedUntil ?? 0, until);
+      await atomicWrite(schema);
+    });
+  }
+
+  return {
+    read,
+    readLatest,
+    write,
+    getAge,
+    migrateUnknown,
+    getRateLimitedUntil,
+    setRateLimitedUntil,
+  };
 }
