@@ -257,36 +257,74 @@ describe("createCacheStore", () => {
     });
   });
 
-  describe("rate-limit cooldown", () => {
-    it("returns the recorded cooldown while it is in the future", async () => {
+  describe("shared fetch backoff", () => {
+    it("reports the backoff while nextAttemptAt is in the future and keeps the streak", async () => {
       let currentTime = frozenNow;
       const store = createCacheStore({ cacheDir: tmpDir, now: () => currentTime });
 
-      await store.setRateLimitedUntil("claude", frozenNow + 60_000);
+      await store.setBackoff("claude", { nextAttemptAt: frozenNow + 60_000, failureStreak: 2 });
 
-      expect(store.getRateLimitedUntil("claude")).toBe(frozenNow + 60_000);
+      expect(store.getBackoff("claude")).toEqual({
+        nextAttemptAt: frozenNow + 60_000,
+        failureStreak: 2,
+      });
       currentTime = frozenNow + 60_000;
-      expect(store.getRateLimitedUntil("claude")).toBeNull();
+      expect(store.getBackoff("claude")).toEqual({ nextAttemptAt: null, failureStreak: 2 });
     });
 
-    it("keeps the later cooldown when a shorter one is recorded", async () => {
+    it("clears the backoff", async () => {
       const store = createCacheStore({ cacheDir: tmpDir, now: () => frozenNow });
 
-      await store.setRateLimitedUntil("claude", frozenNow + 240_000);
-      await store.setRateLimitedUntil("claude", frozenNow + 60_000);
+      await store.setBackoff("claude", { nextAttemptAt: frozenNow + 60_000, failureStreak: 1 });
+      await store.setBackoff("claude", null);
 
-      expect(store.getRateLimitedUntil("claude")).toBe(frozenNow + 240_000);
+      expect(store.getBackoff("claude")).toEqual({ nextAttemptAt: null, failureStreak: 0 });
     });
 
     it("survives account writes and pruning of a provider with no accounts", async () => {
       const store = createCacheStore({ cacheDir: tmpDir, now: () => frozenNow });
 
-      await store.setRateLimitedUntil("claude", frozenNow + 60_000);
+      await store.setBackoff("claude", { nextAttemptAt: frozenNow + 60_000, failureStreak: 1 });
       await store.write("openai", "a@test.com", makeEntry({ timestamp: frozenNow }));
-      await store.write("claude", "b@test.com", makeEntry({ timestamp: frozenNow }));
 
-      expect(store.getRateLimitedUntil("claude")).toBe(frozenNow + 60_000);
-      expect(store.getRateLimitedUntil("openai")).toBeNull();
+      expect(store.getBackoff("claude").nextAttemptAt).toBe(frozenNow + 60_000);
+      expect(store.getBackoff("openai")).toEqual({ nextAttemptAt: null, failureStreak: 0 });
+    });
+  });
+
+  describe("fetch lock", () => {
+    it("grants the lock to one holder until it is released", () => {
+      const a = createCacheStore({ cacheDir: tmpDir, now: () => frozenNow });
+      const b = createCacheStore({ cacheDir: tmpDir, now: () => frozenNow });
+
+      const release = a.tryAcquireFetchLock("claude", 60_000);
+
+      expect(release).not.toBeNull();
+      expect(b.tryAcquireFetchLock("claude", 60_000)).toBeNull();
+      expect(b.tryAcquireFetchLock("openai", 60_000)).not.toBeNull();
+      release!();
+      expect(b.tryAcquireFetchLock("claude", 60_000)).not.toBeNull();
+    });
+
+    it("takes over an expired lock and ignores the stale holder's release", () => {
+      let currentTime = frozenNow;
+      const store = createCacheStore({ cacheDir: tmpDir, now: () => currentTime });
+
+      const staleRelease = store.tryAcquireFetchLock("claude", 60_000)!;
+      currentTime += 60_001;
+      const release = store.tryAcquireFetchLock("claude", 60_000);
+
+      expect(release).not.toBeNull();
+      staleRelease();
+      expect(store.tryAcquireFetchLock("claude", 60_000)).toBeNull();
+    });
+
+    it("lets the caller proceed unlocked when the lock file cannot be created", async () => {
+      const blocker = join(tmpDir, "blocker");
+      await writeFile(blocker, "");
+      const store = createCacheStore({ cacheDir: join(blocker, "sub"), now: () => frozenNow });
+
+      expect(store.tryAcquireFetchLock("claude", 60_000)).toEqual(expect.any(Function));
     });
   });
 });

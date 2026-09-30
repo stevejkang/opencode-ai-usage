@@ -38,11 +38,16 @@ function delay(ms: number, signal: AbortSignal): Promise<void> {
   });
 }
 
-const BACKOFF_DELAYS = [200, 400, 800];
+const NETWORK_RETRY_DELAYS = [500];
 const DEFAULT_RETRY_AFTER_S = 60;
 const MAX_JITTER_MS = 10_000;
 const JITTER_RATIO = 0.1;
-const MAX_RATE_LIMIT_BACKOFF_MS = 10 * 60 * 1000;
+const FETCH_LOCK_TTL_MS = 60_000;
+const LOCK_BUSY_RECHECK_MS = 5_000;
+const MINUTE_MS = 60_000;
+const MAX_FAILURE_BACKOFF_MS = 15 * MINUTE_MS;
+const RATE_LIMIT_PROBE_CAP_MS = 15 * MINUTE_MS;
+const MAX_RATE_LIMIT_BACKOFF_MS = 60 * MINUTE_MS;
 
 function rateLimitRetryAfterMs(error: unknown): number | null {
   if (!(error instanceof ProviderFetchError)) return null;
@@ -50,12 +55,29 @@ function rateLimitRetryAfterMs(error: unknown): number | null {
   return (error.info.retryAfterS ?? DEFAULT_RETRY_AFTER_S) * 1000;
 }
 
+/**
+ * Delay before any process may fetch again after the `streak`-th consecutive failure.
+ * A 429's Retry-After is clamped to a probe cap (15m, 30m, then 60m) because the
+ * endpoint often lifts much sooner than it advertises; a single lock holder probes it.
+ */
+export function failureBackoffMs(error: unknown, streak: number, intervalMs: number): number {
+  const retryAfterMs = rateLimitRetryAfterMs(error);
+  if (retryAfterMs === null) {
+    return Math.min(intervalMs * 2 ** (streak - 1), MAX_FAILURE_BACKOFF_MS);
+  }
+  const probeCapMs = Math.min(
+    RATE_LIMIT_PROBE_CAP_MS * 2 ** (streak - 1),
+    MAX_RATE_LIMIT_BACKOFF_MS,
+  );
+  return Math.min(Math.max(retryAfterMs, intervalMs * 2 ** streak), probeCapMs);
+}
+
 async function fetchWithRetry(
   provider: ProviderDefinition<unknown>,
   deps: ProviderDeps,
   signal: AbortSignal,
 ): Promise<FetchResult<unknown>> {
-  for (let attempt = 0; attempt <= BACKOFF_DELAYS.length; attempt++) {
+  for (let attempt = 0; attempt <= NETWORK_RETRY_DELAYS.length; attempt++) {
     try {
       return await provider.fetch(deps, signal);
     } catch (error) {
@@ -65,11 +87,11 @@ async function fetchWithRetry(
       const isRetryable =
         error.info.kind === "network" || (error.info.kind === "http" && error.info.status >= 500);
 
-      if (!isRetryable || attempt >= BACKOFF_DELAYS.length) {
+      if (!isRetryable || attempt >= NETWORK_RETRY_DELAYS.length) {
         throw error;
       }
 
-      await delay(BACKOFF_DELAYS[attempt], signal);
+      await delay(NETWORK_RETRY_DELAYS[attempt], signal);
     }
   }
 
@@ -78,16 +100,17 @@ async function fetchWithRetry(
 
 /**
  * Runs the fetch loop for one provider. Several OpenCode processes share the cache, so
- * each cycle first adopts fresher data written by another process and honors a
- * cache-wide 429 cooldown before fetching; only one process per interval should hit
- * the provider API.
+ * every cycle first shows any newer data another process wrote, skips fetching while
+ * the cached data is younger than the interval, honors the shared failure backoff, and
+ * only fetches while holding the provider's cross-process fetch lock. While waiting on
+ * a backoff or a busy lock it keeps checking the cache every interval, so a peer's
+ * successful fetch shows up without waiting out the backoff.
  */
 export function createRefreshLoop(options: RefreshLoopOptions): void {
   const { provider, deps, cache, signal, intervalMs, setState } = options;
 
   let lastKnownAccountKey: string = UNKNOWN_ACCOUNT_KEY;
   let lastGoodState: RefreshState | null = null;
-  let rateLimitStreak = 0;
 
   const jitterMs = () => Math.random() * Math.min(MAX_JITTER_MS, intervalMs * JITTER_RATIO);
 
@@ -104,12 +127,13 @@ export function createRefreshLoop(options: RefreshLoopOptions): void {
     setState(state);
   };
 
-  const readFreshPeer = () => {
+  const adoptNewerCacheEntry = (): number | null => {
     const latest = cache.readLatest(provider.id);
     if (!latest) return null;
-    const isNewer = latest.entry.timestamp > (lastGoodState?.lastFetchedAt ?? -Infinity);
-    const isFresh = deps.now() - latest.entry.timestamp < intervalMs;
-    return isNewer && isFresh ? latest : null;
+    if (latest.entry.timestamp > (lastGoodState?.lastFetchedAt ?? -Infinity)) {
+      adopt(latest.accountKey, latest.entry);
+    }
+    return deps.now() - latest.entry.timestamp;
   };
 
   const scheduleIn = (ms: number) => {
@@ -127,20 +151,23 @@ export function createRefreshLoop(options: RefreshLoopOptions): void {
   const cycle = async () => {
     if (signal.aborted) return;
 
-    const peer = readFreshPeer();
-    if (peer) {
-      adopt(peer.accountKey, peer.entry);
-      scheduleIn(intervalMs);
+    const cachedAgeMs = adoptNewerCacheEntry();
+    if (cachedAgeMs !== null && cachedAgeMs < intervalMs) {
+      scheduleIn(intervalMs - cachedAgeMs);
       return;
     }
 
-    const cooldownUntil = cache.getRateLimitedUntil(provider.id);
-    if (cooldownUntil !== null) {
-      scheduleIn(cooldownUntil - deps.now());
+    const backoff = cache.getBackoff(provider.id);
+    if (backoff.nextAttemptAt !== null) {
+      scheduleIn(Math.min(intervalMs, backoff.nextAttemptAt - deps.now()));
       return;
     }
 
-    let nextDelayMs = intervalMs;
+    const releaseLock = cache.tryAcquireFetchLock(provider.id, FETCH_LOCK_TTL_MS);
+    if (releaseLock === null) {
+      scheduleIn(Math.min(intervalMs, LOCK_BUSY_RECHECK_MS));
+      return;
+    }
 
     try {
       const result = await fetchWithRetry(provider, deps, signal);
@@ -161,7 +188,7 @@ export function createRefreshLoop(options: RefreshLoopOptions): void {
       };
 
       await cache.write(provider.id, accountKey, entry);
-      rateLimitStreak = 0;
+      if (backoff.failureStreak > 0) await cache.setBackoff(provider.id, null);
 
       const good: RefreshState = {
         windows: result.windows,
@@ -175,18 +202,16 @@ export function createRefreshLoop(options: RefreshLoopOptions): void {
     } catch (error) {
       if (signal.aborted) return;
 
-      const retryAfterMs = rateLimitRetryAfterMs(error);
-      if (retryAfterMs !== null) {
-        rateLimitStreak += 1;
-        await cache.setRateLimitedUntil(provider.id, deps.now() + retryAfterMs);
-        const backoffMs = Math.min(intervalMs * 2 ** rateLimitStreak, MAX_RATE_LIMIT_BACKOFF_MS);
-        nextDelayMs = Math.max(retryAfterMs, backoffMs);
-      }
+      const failureStreak = backoff.failureStreak + 1;
+      await cache.setBackoff(provider.id, {
+        nextAttemptAt: deps.now() + failureBackoffMs(error, failureStreak, intervalMs),
+        failureStreak,
+      });
 
-      const peerAfterFailure = readFreshPeer();
-      if (peerAfterFailure) {
-        adopt(peerAfterFailure.accountKey, peerAfterFailure.entry);
-        scheduleIn(nextDelayMs);
+      const previousFetchedAt = lastGoodState?.lastFetchedAt ?? null;
+      adoptNewerCacheEntry();
+      if ((lastGoodState?.lastFetchedAt ?? null) !== previousFetchedAt) {
+        scheduleIn(intervalMs);
         return;
       }
 
@@ -215,9 +240,11 @@ export function createRefreshLoop(options: RefreshLoopOptions): void {
           lastFetchedAt: stale?.timestamp ?? null,
         });
       }
+    } finally {
+      releaseLock();
     }
 
-    scheduleIn(nextDelayMs);
+    scheduleIn(intervalMs);
   };
 
   const seed = cache.readLatest(provider.id);

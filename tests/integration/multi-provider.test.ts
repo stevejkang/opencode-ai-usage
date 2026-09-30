@@ -3,7 +3,7 @@ import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { createRegistry } from "../../src/registry";
 import { createCacheStore } from "../../src/cache";
-import { createRefreshLoop } from "../../src/refresh";
+import { createRefreshLoop, failureBackoffMs } from "../../src/refresh";
 import { computeDisplayPercent } from "../../src/tui-logic";
 import { getPercentColor } from "../../src/format";
 import {
@@ -434,7 +434,7 @@ describe("multi-provider integration", () => {
     it("two windows shrink to one on next successful fetch — cache replaces, not merges", async () => {
       vi.useFakeTimers({ now: FROZEN_NOW });
 
-      const cache = createCacheStore({ cacheDir: tmpDir, now: () => FROZEN_NOW });
+      const cache = createCacheStore({ cacheDir: tmpDir, now: () => Date.now() });
       const twoWindows = makeWindows(30, 60);
       const oneWindow = makeWindows(45);
       let fetchCount = 0;
@@ -454,7 +454,7 @@ describe("multi-provider integration", () => {
 
       createRefreshLoop({
         provider: makeFakeProvider("test", fetchFn),
-        deps: makeFakeDeps(),
+        deps: makeFakeDeps({ now: () => Date.now() }),
         cache,
         signal: ac.signal,
         intervalMs: 5_000,
@@ -622,7 +622,10 @@ describe("multi-provider integration", () => {
 
       const limited = await tracker.waitFor(1);
       expect(limited.error).toBe("rate limited");
-      expect(cache.getRateLimitedUntil("test")).toBe(FROZEN_NOW + retryAfterS * 1000);
+      expect(cache.getBackoff("test")).toEqual({
+        nextAttemptAt: FROZEN_NOW + 120_000,
+        failureStreak: 1,
+      });
 
       await vi.advanceTimersByTimeAsync(120_000 - 1);
       expect(fetchCount).toBe(1);
@@ -716,7 +719,7 @@ describe("multi-provider integration", () => {
     it("success→migrate→fail preserves windows+profile with error set and lastFetchedAt preserved", async () => {
       vi.useFakeTimers({ now: FROZEN_NOW });
 
-      const cache = createCacheStore({ cacheDir: tmpDir, now: () => FROZEN_NOW });
+      const cache = createCacheStore({ cacheDir: tmpDir, now: () => Date.now() });
       let fetchCount = 0;
 
       const fetchFn = vi.fn<ProviderDefinition["fetch"]>().mockImplementation(() => {
@@ -737,7 +740,7 @@ describe("multi-provider integration", () => {
 
       createRefreshLoop({
         provider: makeFakeProvider("claude", fetchFn),
-        deps: makeFakeDeps(),
+        deps: makeFakeDeps({ now: () => Date.now() }),
         cache,
         signal: ac.signal,
         intervalMs: 5_000,
@@ -794,7 +797,7 @@ describe("multi-provider integration", () => {
     it("success→fail→success sequence never emits empty-windows state after first success", async () => {
       vi.useFakeTimers({ now: FROZEN_NOW });
 
-      const cache = createCacheStore({ cacheDir: tmpDir, now: () => FROZEN_NOW });
+      const cache = createCacheStore({ cacheDir: tmpDir, now: () => Date.now() });
       let fetchCount = 0;
 
       const fetchFn = vi.fn<ProviderDefinition["fetch"]>().mockImplementation(() => {
@@ -815,7 +818,7 @@ describe("multi-provider integration", () => {
 
       createRefreshLoop({
         provider: makeFakeProvider("claude", fetchFn),
-        deps: makeFakeDeps(),
+        deps: makeFakeDeps({ now: () => Date.now() }),
         cache,
         signal: ac.signal,
         intervalMs: 5_000,
@@ -849,7 +852,7 @@ describe("multi-provider integration", () => {
     it("first fetch with null accountKey caches under __unknown__ then second fetch migrates to real key", async () => {
       vi.useFakeTimers({ now: FROZEN_NOW });
 
-      const cache = createCacheStore({ cacheDir: tmpDir, now: () => FROZEN_NOW });
+      const cache = createCacheStore({ cacheDir: tmpDir, now: () => Date.now() });
       let fetchCount = 0;
 
       const fetchFn = vi.fn<ProviderDefinition["fetch"]>().mockImplementation(() => {
@@ -867,7 +870,7 @@ describe("multi-provider integration", () => {
 
       createRefreshLoop({
         provider: makeFakeProvider("test", fetchFn),
-        deps: makeFakeDeps(),
+        deps: makeFakeDeps({ now: () => Date.now() }),
         cache,
         signal: ac.signal,
         intervalMs: 5_000,
@@ -1011,16 +1014,18 @@ describe("multi-provider integration", () => {
       const trackerA = createStateTracker();
       const trackerB = createStateTracker();
       const ac = new AbortController();
+      const acA = new AbortController();
 
       createRefreshLoop({
         provider: makeFakeProvider("claude", fetchA),
         deps,
         cache,
-        signal: ac.signal,
+        signal: acA.signal,
         intervalMs: 200_000,
         setState: trackerA.setState,
       });
       await trackerA.waitFor(1);
+      acA.abort();
 
       createRefreshLoop({
         provider: makeFakeProvider("claude", fetchB),
@@ -1031,7 +1036,7 @@ describe("multi-provider integration", () => {
         setState: trackerB.setState,
       });
 
-      await vi.advanceTimersByTimeAsync(300_000 - 1);
+      await vi.advanceTimersByTimeAsync(400_000 - 1);
       expect(fetchB).not.toHaveBeenCalled();
 
       await vi.advanceTimersByTimeAsync(1);
@@ -1042,5 +1047,131 @@ describe("multi-provider integration", () => {
 
       ac.abort();
     });
+  });
+});
+
+describe("failureBackoffMs", () => {
+  it("doubles the interval per failure up to 15 minutes", () => {
+    const err = new Error("network");
+    expect(failureBackoffMs(err, 1, 60_000)).toBe(60_000);
+    expect(failureBackoffMs(err, 3, 60_000)).toBe(240_000);
+    expect(failureBackoffMs(err, 10, 60_000)).toBe(15 * 60_000);
+  });
+
+  it("clamps a long 429 Retry-After to 15, 30, then 60 minute probe caps", () => {
+    const err = new ProviderFetchError("429", { kind: "http", status: 429, retryAfterS: 3600 });
+    expect(failureBackoffMs(err, 1, 60_000)).toBe(15 * 60_000);
+    expect(failureBackoffMs(err, 2, 60_000)).toBe(30 * 60_000);
+    expect(failureBackoffMs(err, 3, 60_000)).toBe(60 * 60_000);
+    expect(failureBackoffMs(err, 5, 60_000)).toBe(60 * 60_000);
+  });
+
+  it("waits at least twice the interval after a short 429", () => {
+    const err = new ProviderFetchError("429", { kind: "http", status: 429, retryAfterS: 60 });
+    expect(failureBackoffMs(err, 1, 60_000)).toBe(120_000);
+  });
+});
+
+describe("single fetcher across processes", () => {
+  const INTERVAL_MS = 200;
+  let tmpDir: string;
+
+  beforeEach(async () => {
+    tmpDir = await mkdtemp(join(tmpdir(), "integ-lock-"));
+    vi.spyOn(Math, "random").mockReturnValue(0);
+  });
+
+  afterEach(async () => {
+    vi.restoreAllMocks();
+    await rm(tmpDir, { recursive: true, force: true });
+  });
+
+  function loop(cache: ReturnType<typeof createCacheStore>, fetch: ProviderDefinition["fetch"]) {
+    const tracker = createStateTracker();
+    const ac = new AbortController();
+    createRefreshLoop({
+      provider: makeFakeProvider("claude", fetch),
+      deps: makeFakeDeps({ now: () => Date.now() }),
+      cache,
+      signal: ac.signal,
+      intervalMs: INTERVAL_MS,
+      setState: tracker.setState,
+    });
+    return { tracker, stop: () => ac.abort() };
+  }
+
+  const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+
+  it("processes starting together send one request and share its result", async () => {
+    const cache = createCacheStore({ cacheDir: tmpDir, now: () => Date.now() });
+    const slow = (percent: number) =>
+      vi.fn<ProviderDefinition["fetch"]>().mockImplementation(async () => {
+        await sleep(50);
+        return {
+          accountKey: "user@x.com",
+          windows: makeWindows(percent),
+          profile: null,
+          extras: null,
+        };
+      });
+    const fetchA = slow(10);
+    const fetchB = slow(90);
+
+    const a = loop(cache, fetchA);
+    const b = loop(cache, fetchB);
+    const shared = await b.tracker.waitFor(1);
+    a.stop();
+    b.stop();
+
+    expect(fetchA).toHaveBeenCalledTimes(1);
+    expect(fetchB).not.toHaveBeenCalled();
+    expect(shared.windows).toEqual(makeWindows(10));
+  });
+
+  it("retries a network failure once and then backs off every process", async () => {
+    const cache = createCacheStore({ cacheDir: tmpDir, now: () => Date.now() });
+    const offline = () =>
+      vi
+        .fn<ProviderDefinition["fetch"]>()
+        .mockRejectedValue(new ProviderFetchError("offline", { kind: "network" }));
+    const fetchA = offline();
+    const fetchB = offline();
+
+    const a = loop(cache, fetchA);
+    await a.tracker.waitFor(1);
+    a.stop();
+    const b = loop(cache, fetchB);
+    await sleep(INTERVAL_MS / 2);
+    b.stop();
+
+    expect(fetchA).toHaveBeenCalledTimes(2);
+    expect(fetchB).not.toHaveBeenCalled();
+    expect(cache.getBackoff("claude")).toMatchObject({ failureStreak: 1 });
+  });
+
+  it("adopts a peer's fresh data while waiting out a long rate-limit backoff", async () => {
+    const cache = createCacheStore({ cacheDir: tmpDir, now: () => Date.now() });
+    const fetch = vi
+      .fn<ProviderDefinition["fetch"]>()
+      .mockRejectedValue(
+        new ProviderFetchError("429", { kind: "http", status: 429, retryAfterS: 3600 }),
+      );
+
+    const a = loop(cache, fetch);
+    expect((await a.tracker.waitFor(1)).error).toBe("429");
+    expect(cache.getBackoff("claude").nextAttemptAt).toBeGreaterThan(Date.now() + 14 * 60_000);
+
+    await cache.write("claude", "user@x.com", {
+      timestamp: Date.now(),
+      windows: makeWindows(42),
+      profile: null,
+      extras: null,
+    });
+    const adopted = await a.tracker.waitFor(2);
+    a.stop();
+
+    expect(fetch).toHaveBeenCalledTimes(1);
+    expect(adopted.error).toBeNull();
+    expect(adopted.windows).toEqual(makeWindows(42));
   });
 });

@@ -1,9 +1,9 @@
-import { readFileSync } from "node:fs";
+import { mkdirSync, readFileSync, unlinkSync, writeFileSync } from "node:fs";
 import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
 import { randomBytes } from "node:crypto";
 import { homedir } from "node:os";
 import { join } from "node:path";
-import type { AccountCache, CacheSchema, CacheStore } from "./types";
+import type { AccountCache, CacheSchema, CacheStore, FetchBackoff } from "./types";
 import { UNKNOWN_ACCOUNT_KEY } from "./types";
 
 const STALENESS_CEILING_MS = 60 * 60 * 1000;
@@ -61,7 +61,7 @@ function pruneExpired(schema: CacheSchema, currentTime: number): void {
         delete provider.accounts[key];
       }
     }
-    const coolingDown = (provider.rateLimitedUntil ?? 0) > currentTime;
+    const coolingDown = (provider.nextAttemptAt ?? 0) > currentTime;
     if (Object.keys(provider.accounts).length === 0 && !coolingDown) {
       delete schema.providers[pid];
     }
@@ -160,19 +160,89 @@ export function createCacheStore(deps: CacheStoreDeps = {}): CacheStore {
     });
   }
 
-  function getRateLimitedUntil(providerId: string): number | null {
-    const until = readSchemaSync(cachePath).providers[providerId]?.rateLimitedUntil;
-    return until !== undefined && until > now() ? until : null;
+  function getBackoff(providerId: string): FetchBackoff {
+    const provider = readSchemaSync(cachePath).providers[providerId];
+    const nextAttemptAt = provider?.nextAttemptAt;
+    return {
+      nextAttemptAt: nextAttemptAt !== undefined && nextAttemptAt > now() ? nextAttemptAt : null,
+      failureStreak: provider?.failureStreak ?? 0,
+    };
   }
 
-  function setRateLimitedUntil(providerId: string, until: number): Promise<void> {
+  function setBackoff(providerId: string, backoff: FetchBackoff | null): Promise<void> {
     return enqueue(async () => {
       const schema = await readSchemaAsync(cachePath);
       pruneExpired(schema, now());
-      const provider = (schema.providers[providerId] ??= { accounts: {} });
-      provider.rateLimitedUntil = Math.max(provider.rateLimitedUntil ?? 0, until);
+      const provider = schema.providers[providerId];
+      if (backoff === null) {
+        if (!provider) return;
+        delete provider.nextAttemptAt;
+        delete provider.failureStreak;
+      } else {
+        const target = provider ?? (schema.providers[providerId] = { accounts: {} });
+        if (backoff.nextAttemptAt === null) delete target.nextAttemptAt;
+        else target.nextAttemptAt = backoff.nextAttemptAt;
+        target.failureStreak = backoff.failureStreak;
+      }
       await atomicWrite(schema);
     });
+  }
+
+  function lockPath(providerId: string): string {
+    return join(cacheDir, `${providerId}.fetch.lock`);
+  }
+
+  function readLockToken(path: string): { token: string; expiresAt: number } | null {
+    try {
+      const data = JSON.parse(readFileSync(path, "utf8"));
+      return typeof data?.token === "string" && typeof data?.expiresAt === "number" ? data : null;
+    } catch {
+      return null;
+    }
+  }
+
+  function removeFile(path: string): boolean {
+    try {
+      unlinkSync(path);
+      return true;
+    } catch (error) {
+      return (error as NodeJS.ErrnoException).code === "ENOENT";
+    }
+  }
+
+  /**
+   * Takes the cross-process lock that elects a single fetcher per provider. Returns a
+   * release function, or `null` while another process holds an unexpired lock. When
+   * the lock file itself cannot be managed the caller proceeds unlocked, so a broken
+   * cache directory never blocks fetching.
+   */
+  function tryAcquireFetchLock(providerId: string, ttlMs: number): (() => void) | null {
+    const path = lockPath(providerId);
+    const token = randomBytes(8).toString("hex");
+    const body = JSON.stringify({ pid: process.pid, token, expiresAt: now() + ttlMs });
+    const release = () => {
+      if (readLockToken(path)?.token === token) removeFile(path);
+    };
+
+    const create = (): boolean => {
+      try {
+        writeFileSync(path, body, { flag: "wx", mode: 0o600 });
+        return true;
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code === "EEXIST") return false;
+        throw error;
+      }
+    };
+
+    try {
+      mkdirSync(cacheDir, { recursive: true, mode: 0o700 });
+      if (create()) return release;
+      const held = readLockToken(path);
+      if (held && held.expiresAt > now()) return null;
+      return removeFile(path) && create() ? release : null;
+    } catch {
+      return () => {};
+    }
   }
 
   return {
@@ -181,7 +251,8 @@ export function createCacheStore(deps: CacheStoreDeps = {}): CacheStore {
     write,
     getAge,
     migrateUnknown,
-    getRateLimitedUntil,
-    setRateLimitedUntil,
+    getBackoff,
+    setBackoff,
+    tryAcquireFetchLock,
   };
 }

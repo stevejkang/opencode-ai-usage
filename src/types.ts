@@ -85,7 +85,13 @@ export interface CacheSchema {
 
 export interface ProviderCache {
   accounts: Record<string, AccountCache>;
-  rateLimitedUntil?: number;
+  nextAttemptAt?: number;
+  failureStreak?: number;
+}
+
+export interface FetchBackoff {
+  nextAttemptAt: number | null;
+  failureStreak: number;
 }
 
 export interface AccountCache {
@@ -103,8 +109,9 @@ export interface CacheStore {
   write(providerId: string, accountKey: string, entry: AccountCache): Promise<void>;
   getAge(providerId: string, accountKey: string): number | null;
   migrateUnknown(providerId: string, newAccountKey: string): Promise<void>;
-  getRateLimitedUntil(providerId: string): number | null;
-  setRateLimitedUntil(providerId: string, until: number): Promise<void>;
+  getBackoff(providerId: string): FetchBackoff;
+  setBackoff(providerId: string, backoff: FetchBackoff | null): Promise<void>;
+  tryAcquireFetchLock(providerId: string, ttlMs: number): (() => void) | null;
 }
 
 export interface RefreshState {
