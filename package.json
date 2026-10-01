@@ -2,6 +2,23 @@
   "name": "opencode-ai-usage",
   "version": "0.0.1-rc.0",
   "description": "OpenCode TUI sidebar plugin displaying multi-provider AI usage statistics",
+  "keywords": [
+    "usage",
+    "claude",
+    "codex",
+    "opencode",
+    "opencode-plugin"
+  ],
+  "homepage": "https://github.com/stevejkang/opencode-ai-usage#readme",
+  "bugs": {
+    "url": "https://github.com/stevejkang/opencode-ai-usage/issues"
+  },
+  "license": "MIT",
+  "author": "stevejkang",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/stevejkang/opencode-ai-usage.git"
+  },
   "files": [
     "src"
   ],
