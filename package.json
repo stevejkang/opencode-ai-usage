@@ -3,11 +3,11 @@
   "version": "0.0.1-rc.0",
   "description": "OpenCode TUI sidebar plugin displaying multi-provider AI usage statistics",
   "keywords": [
-    "usage",
     "claude",
     "codex",
     "opencode",
-    "opencode-plugin"
+    "opencode-plugin",
+    "usage"
   ],
   "homepage": "https://github.com/stevejkang/opencode-ai-usage#readme",
   "bugs": {
