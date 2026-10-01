@@ -14,9 +14,9 @@ An [OpenCode](https://opencode.ai) TUI sidebar plugin that displays AI provider 
 
 ▼ OpenAI Usage
  user@example.com
- Session       resets in 1h 42m
+ Session        resets in 1h 42m
  ━━━━━━━━━━━━━━────────────  46%
- Weekly         resets in 2d 9h
+ Weekly          resets in 2d 9h
  ━━━━━━────────────────────  22%
 ```
 

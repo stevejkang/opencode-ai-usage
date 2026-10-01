@@ -115,8 +115,8 @@ After restart, send a chat message — the sidebar renders after the first messa
 
 ▼ OpenAI Usage
  user@example.com
- Monthly       resets in 29d 23h
- ──────────────────────────   0%
+ Monthly      resets in 29d 23h
+ ━━━──────────────────────  11%
 ```
 
 Only detected providers appear. If a provider's requirements are not met, its section is hidden entirely.
