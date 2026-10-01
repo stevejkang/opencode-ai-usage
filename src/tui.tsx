@@ -10,6 +10,7 @@ import type {
   PluginOptions,
   ProviderDefinition,
   ProviderDeps,
+  RefreshDiagnostics,
   RefreshState,
   TuiTheme,
   UsageWindow,
@@ -18,6 +19,13 @@ import { toPercent } from "./types";
 import { createRegistry } from "./registry";
 import { createRefreshLoop } from "./refresh";
 import { createCacheStore } from "./cache";
+import {
+  createDebugLog,
+  debugLogDir,
+  describeProcess,
+  noopDebugLog,
+  resolveDebugLogConfig,
+} from "./debug-log";
 import {
   formatBar,
   formatCreditDisplay,
@@ -29,13 +37,19 @@ import { createClaudeProvider } from "./providers/claude";
 import { createOpenAIProvider } from "./providers/openai";
 import { createOpenCodeGoProvider } from "./providers/opencode-go";
 
-import { computeDisplayPercent, computeSectionVisibility } from "./tui-logic";
+import {
+  computeDisplayPercent,
+  computeSectionVisibility,
+  computeStaleText,
+  explainStale,
+} from "./tui-logic";
 
 export {
   computeSectionVisibility,
   computeStaleText,
   computeDisplayPercent,
   computeCountdown,
+  explainStale,
 } from "./tui-logic";
 export type { SectionVisibility } from "./tui-logic";
 
@@ -99,7 +113,10 @@ interface ProviderRuntime {
   countdown: () => number;
   refreshIntervalMs: number;
   headerColor: string;
+  diagnostics: (() => RefreshDiagnostics) | null;
 }
+
+const STALE_WATCH_INTERVAL_MS = 60_000;
 
 function renderWindowRow(
   w: UsageWindow,
@@ -322,6 +339,25 @@ const tui: TuiPlugin = async (api, rawOptions, _meta) => {
   ]);
   const enabled = registry.getEnabled(options.disabledProviders);
 
+  const debugConfig = resolveDebugLogConfig(options.debugLog);
+  const log = debugConfig.enabled
+    ? createDebugLog({
+        retentionDays: debugConfig.retentionDays,
+        maxFileBytes: debugConfig.maxFileBytes,
+      })
+    : noopDebugLog;
+  if (debugConfig.enabled) {
+    log("plugin.init", {
+      cwd: process.cwd(),
+      ...describeProcess(),
+      logDir: debugLogDir(),
+      debugLog: debugConfig,
+      providers: enabled.map((p) => p.id),
+      displayMode,
+      showRemaining,
+    });
+  }
+
   const controller = new AbortController();
   const { signal } = controller;
   const tickTimers: (ReturnType<typeof setInterval> | null)[] = [];
@@ -332,13 +368,24 @@ const tui: TuiPlugin = async (api, rawOptions, _meta) => {
     try {
       const result = await provider.detect(deps, signal);
       detected = result.available;
-    } catch {
+      log("provider.detect", {
+        provider: provider.id,
+        available: result.available,
+        reason: result.available ? null : result.reason,
+      });
+    } catch (error) {
       detected = false;
+      log("provider.detect", {
+        provider: provider.id,
+        available: false,
+        reason: error instanceof Error ? error.message : String(error),
+      });
     }
 
     const overrides = options.providers?.[provider.id];
     const refreshIntervalMs =
       (overrides?.refreshInterval ?? provider.defaultRefreshIntervalS) * 1000;
+    let diagnostics: (() => RefreshDiagnostics) | null = null;
     const headerColor = overrides?.headerColor ?? provider.defaultHeaderColor;
 
     const [state, rawSetState] = createSignal<RefreshState>({
@@ -369,7 +416,15 @@ const tui: TuiPlugin = async (api, rawOptions, _meta) => {
         rawSetState(s);
       };
 
-      createRefreshLoop({ provider, deps, cache, signal, intervalMs: refreshIntervalMs, setState });
+      diagnostics = createRefreshLoop({
+        provider,
+        deps,
+        cache,
+        signal,
+        intervalMs: refreshIntervalMs,
+        setState,
+        log,
+      }).diagnostics;
     }
 
     runtimes.push({
@@ -381,11 +436,58 @@ const tui: TuiPlugin = async (api, rawOptions, _meta) => {
       countdown,
       refreshIntervalMs,
       headerColor,
+      diagnostics,
     });
   }
 
+  const watchedStaleText = new Map<string, string | null>();
+  const renderedStaleText = new Map<string, string | null>();
+
+  const staleFields = (rt: ProviderRuntime, now: number) => {
+    const s = rt.state();
+    const diag = rt.diagnostics?.() ?? null;
+    return {
+      provider: rt.provider.id,
+      lastFetchedAt: s.lastFetchedAt,
+      ageMs: s.lastFetchedAt === null ? null : now - s.lastFetchedAt,
+      thresholdMs: 2 * rt.refreshIntervalMs,
+      stateError: s.error,
+      reasons: diag ? explainStale({ diag, refreshIntervalMs: rt.refreshIntervalMs, now }) : [],
+      diagnostics: diag,
+    };
+  };
+
+  const watchStale = () => {
+    const now = Date.now();
+    for (const rt of runtimes) {
+      if (!rt.detected) continue;
+      const s = rt.state();
+      const staleText =
+        s.lastFetchedAt === null
+          ? null
+          : computeStaleText(s.lastFetchedAt, rt.refreshIntervalMs, now);
+      const previous = watchedStaleText.get(rt.provider.id) ?? null;
+      watchedStaleText.set(rt.provider.id, staleText);
+
+      if (staleText !== null) {
+        log(previous === null ? "stale.shown" : "stale.persist", {
+          staleText,
+          renderedStaleText: renderedStaleText.get(rt.provider.id) ?? null,
+          ...staleFields(rt, now),
+        });
+      } else if (previous !== null) {
+        log("stale.cleared", { previousStaleText: previous, ...staleFields(rt, now) });
+      }
+    }
+  };
+  const staleWatcher = debugConfig.enabled
+    ? setInterval(watchStale, STALE_WATCH_INTERVAL_MS)
+    : null;
+
   api.lifecycle.onDispose(() => {
+    log("plugin.dispose");
     controller.abort();
+    if (staleWatcher) clearInterval(staleWatcher);
     for (const timer of tickTimers) {
       if (timer) clearInterval(timer);
     }
@@ -416,6 +518,16 @@ const tui: TuiPlugin = async (api, rawOptions, _meta) => {
                   now,
                 });
                 const isOpen = rt.open();
+
+                const renderedStale = vis.kind === "data" ? vis.staleText : null;
+                if ((renderedStaleText.get(rt.provider.id) ?? null) !== renderedStale) {
+                  renderedStaleText.set(rt.provider.id, renderedStale);
+                  log("render.stale_changed", {
+                    staleText: renderedStale,
+                    visibility: vis.kind,
+                    ...staleFields(rt, now),
+                  });
+                }
 
                 const header = (
                   <box height={1} flexDirection="row" onMouseDown={rt.toggleOpen}>

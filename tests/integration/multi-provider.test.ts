@@ -1050,6 +1050,140 @@ describe("multi-provider integration", () => {
   });
 });
 
+describe("refresh loop diagnostics", () => {
+  let tmpDir: string;
+
+  beforeEach(async () => {
+    tmpDir = await mkdtemp(join(tmpdir(), "integ-diag-"));
+  });
+
+  afterEach(async () => {
+    await rm(tmpDir, { recursive: true, force: true });
+  });
+
+  it("records writer pid, logs seed and failure, and keeps seeded data on failure", async () => {
+    const cache = createCacheStore({ cacheDir: tmpDir, now: () => FROZEN_NOW });
+    await cache.write("claude", "a@test.com", {
+      timestamp: FROZEN_NOW - 10 * 60_000,
+      windows: makeWindows(40),
+      profile: null,
+      extras: null,
+      writerPid: 4242,
+    });
+
+    const events: { event: string; fields: Record<string, unknown> }[] = [];
+    const tracker = createStateTracker();
+    const ac = new AbortController();
+
+    const handle = createRefreshLoop({
+      provider: makeFakeProvider(
+        "claude",
+        vi
+          .fn<ProviderDefinition["fetch"]>()
+          .mockRejectedValue(new ProviderFetchError("HTTP 401", { kind: "http", status: 401 })),
+      ),
+      deps: makeFakeDeps(),
+      cache,
+      signal: ac.signal,
+      intervalMs: 60_000,
+      setState: tracker.setState,
+      log: (event, fields = {}) => events.push({ event, fields }),
+    });
+
+    const failed = await tracker.waitFor(2);
+    ac.abort();
+
+    expect(failed.lastFetchedAt).toBe(FROZEN_NOW - 10 * 60_000);
+    expect(events.map((e) => e.event)).toEqual([
+      "cache.seed",
+      "cycle.start",
+      "fetch.backoff",
+      "cycle.failure",
+    ]);
+    expect(events[0].fields).toMatchObject({ writerPid: 4242, ageMs: 10 * 60_000 });
+    expect(events[2].fields).toMatchObject({ failureStreak: 1, backoffMs: 60_000 });
+    expect(events[3].fields).toMatchObject({
+      error: "HTTP 401",
+      consecutiveFailures: 1,
+      dataSource: "cache-seed",
+      dataWriterPid: 4242,
+    });
+    expect(handle.diagnostics()).toMatchObject({
+      phase: "scheduled",
+      lastSuccessAt: null,
+      lastError: "HTTP 401",
+      dataSource: "cache-seed",
+      dataWriterPid: 4242,
+    });
+  });
+
+  it("stamps successful cache writes with the current process pid", async () => {
+    const cache = createCacheStore({ cacheDir: tmpDir, now: () => FROZEN_NOW });
+    const tracker = createStateTracker();
+    const ac = new AbortController();
+
+    const handle = createRefreshLoop({
+      provider: makeFakeProvider(
+        "claude",
+        vi.fn<ProviderDefinition["fetch"]>().mockResolvedValue({
+          accountKey: "a@test.com",
+          windows: makeWindows(10),
+          profile: null,
+          extras: null,
+        }),
+      ),
+      deps: makeFakeDeps(),
+      cache,
+      signal: ac.signal,
+      intervalMs: 60_000,
+      setState: tracker.setState,
+    });
+
+    await tracker.waitFor(1);
+    ac.abort();
+
+    expect(cache.read("claude", "a@test.com")!.writerPid).toBe(process.pid);
+    expect(handle.diagnostics()).toMatchObject({
+      dataSource: "fetch",
+      dataWriterPid: process.pid,
+      lastSuccessAt: FROZEN_NOW,
+      consecutiveFailures: 0,
+    });
+  });
+
+  it("logs a crashed cycle and keeps the loop running", async () => {
+    const cache = createCacheStore({ cacheDir: tmpDir, now: () => FROZEN_NOW });
+    cache.setBackoff = () => Promise.reject(new Error("disk full"));
+    const events: { event: string; fields: Record<string, unknown> }[] = [];
+    const ac = new AbortController();
+
+    createRefreshLoop({
+      provider: makeFakeProvider(
+        "claude",
+        vi
+          .fn<ProviderDefinition["fetch"]>()
+          .mockRejectedValue(new ProviderFetchError("429", { kind: "http", status: 429 })),
+      ),
+      deps: makeFakeDeps(),
+      cache,
+      signal: ac.signal,
+      intervalMs: 50,
+      setState: vi.fn(),
+      log: (event, fields = {}) => events.push({ event, fields }),
+    });
+
+    await vi.waitFor(() =>
+      expect(events.filter((e) => e.event === "cycle.crash").length).toBeGreaterThanOrEqual(2),
+    );
+    ac.abort();
+
+    expect(events.find((e) => e.event === "cycle.crash")!.fields).toMatchObject({
+      provider: "claude",
+      error: "disk full",
+    });
+  });
+});
+
 describe("failureBackoffMs", () => {
   it("doubles the interval per failure up to 15 minutes", () => {
     const err = new Error("network");

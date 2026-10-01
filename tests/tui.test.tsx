@@ -1,10 +1,11 @@
 import { toPercent } from "../src/types";
-import type { Percent0to100 } from "../src/types";
+import type { Percent0to100, RefreshDiagnostics } from "../src/types";
 import {
   computeSectionVisibility,
   computeStaleText,
   computeDisplayPercent,
   computeCountdown,
+  explainStale,
 } from "../src/tui-logic";
 
 const INTERVAL_MS = 60_000;
@@ -237,5 +238,87 @@ describe("default export shape", () => {
     expect(typeof mod.computeStaleText).toBe("function");
     expect(typeof mod.computeDisplayPercent).toBe("function");
     expect(typeof mod.computeCountdown).toBe("function");
+  });
+});
+
+describe("explainStale", () => {
+  function makeDiag(overrides: Partial<RefreshDiagnostics> = {}): RefreshDiagnostics {
+    return {
+      phase: "scheduled",
+      phaseSince: BASE_TIME,
+      nextCycleAt: BASE_TIME + INTERVAL_MS,
+      cycles: 1,
+      lastSuccessAt: BASE_TIME,
+      lastErrorAt: null,
+      lastError: null,
+      consecutiveFailures: 0,
+      dataSource: "fetch",
+      dataWriterPid: 123,
+      ...overrides,
+    };
+  }
+
+  const explain = (diag: RefreshDiagnostics, now: number) =>
+    explainStale({ diag, refreshIntervalMs: INTERVAL_MS, now });
+
+  it("reports a fetch that has been in flight longer than one interval", () => {
+    const diag = makeDiag({ phase: "fetching", phaseSince: BASE_TIME, nextCycleAt: null });
+
+    expect(explain(diag, BASE_TIME + 3 * INTERVAL_MS)).toEqual([
+      "fetch in flight for 180s without completing",
+    ]);
+  });
+
+  it("does not flag a fetch that is still within one interval", () => {
+    const diag = makeDiag({ phase: "fetching", nextCycleAt: null });
+
+    expect(explain(diag, BASE_TIME + 1_000)).toEqual(["no fetch failure or stuck phase detected"]);
+  });
+
+  it("reports rate-limit waits", () => {
+    const diag = makeDiag({ phase: "rate-limit-wait", nextCycleAt: null });
+
+    expect(explain(diag, BASE_TIME + 30_000)).toEqual([
+      "rate limited (429), waiting for retry-after for 30s",
+    ]);
+  });
+
+  it("reports shared backoff and fetch lock waits without flagging them overdue", () => {
+    expect(explain(makeDiag({ phase: "backoff-wait" }), BASE_TIME + 30_000)).toEqual([
+      "waiting out shared fetch backoff after failures for 30s",
+    ]);
+    expect(explain(makeDiag({ phase: "lock-wait" }), BASE_TIME + 30_000)).toEqual([
+      "another process holds the fetch lock for 30s",
+    ]);
+  });
+
+  it("reports an overdue scheduled cycle", () => {
+    const diag = makeDiag();
+
+    expect(explain(diag, BASE_TIME + INTERVAL_MS + 20_000)).toEqual(["next cycle overdue by 20s"]);
+  });
+
+  it("reports consecutive failures and cache-seeded data with the writer pid", () => {
+    const diag = makeDiag({
+      lastSuccessAt: null,
+      lastError: "HTTP 401",
+      lastErrorAt: BASE_TIME,
+      consecutiveFailures: 3,
+      dataSource: "cache-seed",
+      dataWriterPid: 4242,
+    });
+
+    expect(explain(diag, BASE_TIME)).toEqual([
+      "last 3 fetch(es) failed: HTTP 401; keeping cache-seed data",
+      "no successful fetch in this process yet; data from cache-seed written by pid 4242",
+    ]);
+  });
+
+  it("reports unknown writer pid for legacy cache entries", () => {
+    const diag = makeDiag({ lastSuccessAt: null, dataSource: "cache-seed", dataWriterPid: null });
+
+    expect(explain(diag, BASE_TIME)).toEqual([
+      "no successful fetch in this process yet; data from cache-seed written by pid unknown",
+    ]);
   });
 });

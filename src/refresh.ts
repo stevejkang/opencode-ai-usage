@@ -4,9 +4,13 @@ import type {
   FetchResult,
   ProviderDefinition,
   ProviderDeps,
+  RefreshDataSource,
+  RefreshDiagnostics,
+  RefreshPhase,
   RefreshState,
 } from "./types";
 import { ProviderFetchError, UNKNOWN_ACCOUNT_KEY } from "./types";
+import { type DebugLog, noopDebugLog } from "./debug-log";
 
 export interface RefreshLoopOptions {
   provider: ProviderDefinition<unknown>;
@@ -15,6 +19,11 @@ export interface RefreshLoopOptions {
   signal: AbortSignal;
   intervalMs: number;
   setState: (state: RefreshState) => void;
+  log?: DebugLog;
+}
+
+export interface RefreshLoopHandle {
+  diagnostics: () => RefreshDiagnostics;
 }
 
 function delay(ms: number, signal: AbortSignal): Promise<void> {
@@ -72,13 +81,20 @@ export function failureBackoffMs(error: unknown, streak: number, intervalMs: num
   return Math.min(Math.max(retryAfterMs, intervalMs * 2 ** streak), probeCapMs);
 }
 
+interface RetryHooks {
+  setPhase: (phase: RefreshPhase) => void;
+  log: DebugLog;
+}
+
 async function fetchWithRetry(
   provider: ProviderDefinition<unknown>,
   deps: ProviderDeps,
   signal: AbortSignal,
+  hooks: RetryHooks,
 ): Promise<FetchResult<unknown>> {
   for (let attempt = 0; attempt <= NETWORK_RETRY_DELAYS.length; attempt++) {
     try {
+      hooks.setPhase("fetching");
       return await provider.fetch(deps, signal);
     } catch (error) {
       if (signal.aborted) throw error;
@@ -91,6 +107,14 @@ async function fetchWithRetry(
         throw error;
       }
 
+      hooks.log("fetch.retry", {
+        provider: provider.id,
+        attempt,
+        delayMs: NETWORK_RETRY_DELAYS[attempt],
+        error: error.message,
+        info: error.info,
+      });
+      hooks.setPhase("retry-wait");
       await delay(NETWORK_RETRY_DELAYS[attempt], signal);
     }
   }
@@ -106,15 +130,34 @@ async function fetchWithRetry(
  * a backoff or a busy lock it keeps checking the cache every interval, so a peer's
  * successful fetch shows up without waiting out the backoff.
  */
-export function createRefreshLoop(options: RefreshLoopOptions): void {
+export function createRefreshLoop(options: RefreshLoopOptions): RefreshLoopHandle {
   const { provider, deps, cache, signal, intervalMs, setState } = options;
+  const log = options.log ?? noopDebugLog;
 
   let lastKnownAccountKey: string = UNKNOWN_ACCOUNT_KEY;
   let lastGoodState: RefreshState | null = null;
 
+  const diag: RefreshDiagnostics = {
+    phase: "fetching",
+    phaseSince: deps.now(),
+    nextCycleAt: null,
+    cycles: 0,
+    lastSuccessAt: null,
+    lastErrorAt: null,
+    lastError: null,
+    consecutiveFailures: 0,
+    dataSource: "none",
+    dataWriterPid: null,
+  };
+
+  const setPhase = (phase: RefreshPhase) => {
+    diag.phase = phase;
+    diag.phaseSince = deps.now();
+  };
+
   const jitterMs = () => Math.random() * Math.min(MAX_JITTER_MS, intervalMs * JITTER_RATIO);
 
-  const adopt = (accountKey: string, entry: AccountCache) => {
+  const adopt = (accountKey: string, entry: AccountCache, source: RefreshDataSource) => {
     lastKnownAccountKey = accountKey;
     const state: RefreshState = {
       windows: entry.windows,
@@ -124,6 +167,8 @@ export function createRefreshLoop(options: RefreshLoopOptions): void {
       lastFetchedAt: entry.timestamp,
     };
     lastGoodState = state;
+    diag.dataSource = source;
+    diag.dataWriterPid = entry.writerPid ?? null;
     setState(state);
   };
 
@@ -131,19 +176,26 @@ export function createRefreshLoop(options: RefreshLoopOptions): void {
     const latest = cache.readLatest(provider.id);
     if (!latest) return null;
     if (latest.entry.timestamp > (lastGoodState?.lastFetchedAt ?? -Infinity)) {
-      adopt(latest.accountKey, latest.entry);
+      diag.lastError = null;
+      diag.consecutiveFailures = 0;
+      adopt(latest.accountKey, latest.entry, "cache-peer");
+      log("cycle.peer", {
+        provider: provider.id,
+        cycle: diag.cycles,
+        accountKey: latest.accountKey,
+        lastFetchedAt: latest.entry.timestamp,
+        writerPid: latest.entry.writerPid ?? null,
+      });
     }
     return deps.now() - latest.entry.timestamp;
   };
 
-  const scheduleIn = (ms: number) => {
+  const scheduleIn = (ms: number, phase: RefreshPhase = "scheduled") => {
     if (signal.aborted) return;
-    const timer = setTimeout(
-      () => {
-        void cycle();
-      },
-      Math.max(0, ms) + jitterMs(),
-    );
+    const waitMs = Math.max(0, ms) + jitterMs();
+    setPhase(phase);
+    diag.nextCycleAt = deps.now() + waitMs;
+    const timer = setTimeout(runCycle, waitMs);
     const onAbort = () => clearTimeout(timer);
     signal.addEventListener("abort", onAbort, { once: true });
   };
@@ -151,26 +203,40 @@ export function createRefreshLoop(options: RefreshLoopOptions): void {
   const cycle = async () => {
     if (signal.aborted) return;
 
+    diag.cycles += 1;
+    diag.nextCycleAt = null;
+    const startedAt = deps.now();
+    log("cycle.start", { provider: provider.id, cycle: diag.cycles });
+
     const cachedAgeMs = adoptNewerCacheEntry();
     if (cachedAgeMs !== null && cachedAgeMs < intervalMs) {
+      log("cycle.fresh", { provider: provider.id, cycle: diag.cycles, cachedAgeMs });
       scheduleIn(intervalMs - cachedAgeMs);
       return;
     }
 
     const backoff = cache.getBackoff(provider.id);
     if (backoff.nextAttemptAt !== null) {
-      scheduleIn(Math.min(intervalMs, backoff.nextAttemptAt - deps.now()));
+      log("cycle.backoff", {
+        provider: provider.id,
+        cycle: diag.cycles,
+        nextAttemptAt: backoff.nextAttemptAt,
+        failureStreak: backoff.failureStreak,
+        waitMs: backoff.nextAttemptAt - startedAt,
+      });
+      scheduleIn(Math.min(intervalMs, backoff.nextAttemptAt - startedAt), "backoff-wait");
       return;
     }
 
     const releaseLock = cache.tryAcquireFetchLock(provider.id, FETCH_LOCK_TTL_MS);
     if (releaseLock === null) {
-      scheduleIn(Math.min(intervalMs, LOCK_BUSY_RECHECK_MS));
+      log("cycle.lock_busy", { provider: provider.id, cycle: diag.cycles });
+      scheduleIn(Math.min(intervalMs, LOCK_BUSY_RECHECK_MS), "lock-wait");
       return;
     }
 
     try {
-      const result = await fetchWithRetry(provider, deps, signal);
+      const result = await fetchWithRetry(provider, deps, signal, { setPhase, log });
       if (signal.aborted) return;
 
       const accountKey = result.accountKey ?? UNKNOWN_ACCOUNT_KEY;
@@ -185,6 +251,7 @@ export function createRefreshLoop(options: RefreshLoopOptions): void {
         windows: result.windows,
         profile: result.profile,
         extras: result.extras,
+        writerPid: process.pid,
       };
 
       await cache.write(provider.id, accountKey, entry);
@@ -198,14 +265,37 @@ export function createRefreshLoop(options: RefreshLoopOptions): void {
         lastFetchedAt: entry.timestamp,
       };
       lastGoodState = good;
+      diag.lastSuccessAt = entry.timestamp;
+      diag.lastError = null;
+      diag.consecutiveFailures = 0;
+      diag.dataSource = "fetch";
+      diag.dataWriterPid = process.pid;
+      log("cycle.success", {
+        provider: provider.id,
+        cycle: diag.cycles,
+        durationMs: deps.now() - startedAt,
+        accountKey,
+        lastFetchedAt: entry.timestamp,
+        clearedFailureStreak: backoff.failureStreak,
+      });
       setState(good);
     } catch (error) {
       if (signal.aborted) return;
 
       const failureStreak = backoff.failureStreak + 1;
-      await cache.setBackoff(provider.id, {
-        nextAttemptAt: deps.now() + failureBackoffMs(error, failureStreak, intervalMs),
+      const backoffMs = failureBackoffMs(error, failureStreak, intervalMs);
+      const nextAttemptAt = deps.now() + backoffMs;
+      await cache.setBackoff(provider.id, { nextAttemptAt, failureStreak });
+      log("fetch.backoff", {
+        provider: provider.id,
+        cycle: diag.cycles,
         failureStreak,
+        backoffMs,
+        nextAttemptAt,
+        retryAfterS:
+          error instanceof ProviderFetchError && error.info.kind === "http"
+            ? (error.info.retryAfterS ?? null)
+            : null,
       });
 
       const previousFetchedAt = lastGoodState?.lastFetchedAt ?? null;
@@ -216,8 +306,27 @@ export function createRefreshLoop(options: RefreshLoopOptions): void {
       }
 
       const errorMessage = error instanceof Error ? error.message : String(error);
+      const info = error instanceof ProviderFetchError ? error.info : null;
+      diag.lastError = errorMessage;
+      diag.lastErrorAt = deps.now();
+      diag.consecutiveFailures += 1;
+
+      const failureFields = {
+        provider: provider.id,
+        cycle: diag.cycles,
+        durationMs: deps.now() - startedAt,
+        error: errorMessage,
+        info,
+        consecutiveFailures: diag.consecutiveFailures,
+      };
 
       if (lastGoodState) {
+        log("cycle.failure", {
+          ...failureFields,
+          keptLastFetchedAt: lastGoodState.lastFetchedAt,
+          dataSource: diag.dataSource,
+          dataWriterPid: diag.dataWriterPid,
+        });
         setState({
           windows: lastGoodState.windows,
           profile: lastGoodState.profile,
@@ -231,6 +340,17 @@ export function createRefreshLoop(options: RefreshLoopOptions): void {
           (lastKnownAccountKey !== UNKNOWN_ACCOUNT_KEY
             ? cache.read(provider.id, UNKNOWN_ACCOUNT_KEY)
             : null);
+
+        if (stale) {
+          diag.dataSource = "cache-fallback";
+          diag.dataWriterPid = stale.writerPid ?? null;
+        }
+        log("cycle.failure", {
+          ...failureFields,
+          keptLastFetchedAt: stale?.timestamp ?? null,
+          dataSource: diag.dataSource,
+          dataWriterPid: diag.dataWriterPid,
+        });
 
         setState({
           windows: stale?.windows ?? [],
@@ -247,15 +367,39 @@ export function createRefreshLoop(options: RefreshLoopOptions): void {
     scheduleIn(intervalMs);
   };
 
+  const runCycle = () => {
+    cycle().catch((error: unknown) => {
+      log("cycle.crash", {
+        provider: provider.id,
+        cycle: diag.cycles,
+        error: error instanceof Error ? error.message : String(error),
+      });
+      scheduleIn(intervalMs);
+    });
+  };
+
   const seed = cache.readLatest(provider.id);
   if (seed) {
-    adopt(seed.accountKey, seed.entry);
     const seedAgeMs = deps.now() - seed.entry.timestamp;
-    if (seedAgeMs < intervalMs) {
-      scheduleIn(intervalMs - seedAgeMs);
-      return;
+    const deferFetchMs = seedAgeMs < intervalMs ? intervalMs - seedAgeMs : 0;
+    log("cache.seed", {
+      provider: provider.id,
+      accountKey: seed.accountKey,
+      entryTimestamp: seed.entry.timestamp,
+      ageMs: seedAgeMs,
+      writerPid: seed.entry.writerPid ?? null,
+      deferFetchMs,
+    });
+    adopt(seed.accountKey, seed.entry, "cache-seed");
+    if (deferFetchMs > 0) {
+      scheduleIn(deferFetchMs);
+      return { diagnostics: () => ({ ...diag }) };
     }
+  } else {
+    log("cache.seed_miss", { provider: provider.id });
   }
 
-  void cycle();
+  runCycle();
+
+  return { diagnostics: () => ({ ...diag }) };
 }

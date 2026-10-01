@@ -67,6 +67,7 @@ https://raw.githubusercontent.com/stevejkang/opencode-ai-usage/refs/heads/main/d
         "disabledProviders": [],
         "displayMode": "mixed",
         "showRemaining": false,
+        "debugLog": { "enabled": false, "retentionDays": 7, "maxFileSizeMB": 10 },
         "providers": {
           "claude": { "refreshInterval": 60, "headerColor": "#E07A3A" },
           "openai": { "refreshInterval": 30, "headerColor": "#10A37F" },
@@ -83,6 +84,9 @@ https://raw.githubusercontent.com/stevejkang/opencode-ai-usage/refs/heads/main/d
 | `disabledProviders`              | `[]`      | Provider IDs to skip entirely, e.g. `["openai"]`                                    |
 | `displayMode`                    | `"mixed"` | `"mixed"`, `"text"`, or `"bar"` (see below)                                         |
 | `showRemaining`                  | `false`   | Show remaining capacity instead of used (see below)                                 |
+| `debugLog.enabled`               | `false`   | Write diagnostic JSONL logs to `~/.cache/opencode-ai-usage/debug-YYYY-MM-DD.log`    |
+| `debugLog.retentionDays`         | `7`       | Delete debug log files not written to for this many days                            |
+| `debugLog.maxFileSizeMB`         | `10`      | Move a day's log file aside once it reaches this size                               |
 | `providers.<id>.refreshInterval` |           | Seconds between data refreshes (claude: `60`, openai: `30`, opencode-go: `60`)      |
 | `providers.<id>.headerColor`     |           | Section header color (claude: `#E07A3A`, openai: `#10A37F`, opencode-go: `#FDFCFC`) |
 

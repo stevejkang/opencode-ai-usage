@@ -50,8 +50,15 @@ export interface ProviderOverrides {
   headerColor?: string;
 }
 
+export interface DebugLogOptions {
+  enabled?: boolean;
+  retentionDays?: number;
+  maxFileSizeMB?: number;
+}
+
 export interface PluginOptions {
   disabledProviders?: string[];
+  debugLog?: DebugLogOptions;
   showRemaining?: boolean;
   displayMode?: DisplayMode;
   providers?: Record<string, ProviderOverrides>;
@@ -99,6 +106,30 @@ export interface AccountCache {
   windows: UsageWindow[];
   profile: ProviderProfile | null;
   extras: unknown | null;
+  writerPid?: number;
+}
+
+export type RefreshPhase =
+  | "fetching"
+  | "retry-wait"
+  | "rate-limit-wait"
+  | "backoff-wait"
+  | "lock-wait"
+  | "scheduled";
+
+export type RefreshDataSource = "none" | "cache-seed" | "cache-peer" | "fetch" | "cache-fallback";
+
+export interface RefreshDiagnostics {
+  phase: RefreshPhase;
+  phaseSince: number;
+  nextCycleAt: number | null;
+  cycles: number;
+  lastSuccessAt: number | null;
+  lastErrorAt: number | null;
+  lastError: string | null;
+  consecutiveFailures: number;
+  dataSource: RefreshDataSource;
+  dataWriterPid: number | null;
 }
 
 export const UNKNOWN_ACCOUNT_KEY = "__unknown__";

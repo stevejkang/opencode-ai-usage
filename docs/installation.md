@@ -48,6 +48,7 @@ All options are optional. Defaults shown:
     "disabledProviders": [],
     "displayMode": "mixed",
     "showRemaining": false,
+    "debugLog": { "enabled": false, "retentionDays": 7, "maxFileSizeMB": 10 },
     "providers": {
       "claude": { "refreshInterval": 60, "headerColor": "#E07A3A" },
       "openai": { "refreshInterval": 30, "headerColor": "#10A37F" },
@@ -62,6 +63,9 @@ All options are optional. Defaults shown:
 | `disabledProviders`              | `[]`      | Provider IDs to skip entirely, e.g. `["openai"]`                                    |
 | `displayMode`                    | `"mixed"` | `"mixed"`, `"text"`, or `"bar"` (see below)                                         |
 | `showRemaining`                  | `false`   | Show remaining capacity instead of used (see below)                                 |
+| `debugLog.enabled`               | `false`   | Write diagnostic JSONL logs to `~/.cache/opencode-ai-usage/debug-YYYY-MM-DD.log`    |
+| `debugLog.retentionDays`         | `7`       | Delete debug log files not written to for this many days                            |
+| `debugLog.maxFileSizeMB`         | `10`      | Move a day's log file aside once it reaches this size                               |
 | `providers.<id>.refreshInterval` |           | Seconds between data refreshes (claude: `60`, openai: `30`, opencode-go: `60`)      |
 | `providers.<id>.headerColor`     |           | Section header color (claude: `#E07A3A`, openai: `#10A37F`, opencode-go: `#FDFCFC`) |
 
@@ -140,6 +144,7 @@ During initial load:
 - **"Failed to fetch usage"**: The provider's API returned an error. After a failure, all OpenCode windows wait before retrying, doubling the wait up to 15 minutes. A rate limit (HTTP 429) can pause refreshes for up to an hour.
 - **Data not updating**: Default refresh intervals are 60s (Claude), 30s (OpenAI), and 60s (OpenCode Go). OpenCode windows share one cache, so only one window calls each provider per interval and the others show its result.
 - **Stale data badge ("updated Xm ago")**: The provider hasn't refreshed in over twice the refresh interval, usually because of the failure backoff above or after the computer wakes from sleep. Clears on the next successful fetch.
+- **Diagnosing refresh problems**: Set `"debugLog": { "enabled": true }` in the plugin options and restart OpenCode. Logs are written to `~/.cache/opencode-ai-usage/debug-YYYY-MM-DD.log`.
 
 ## Uninstall
 
