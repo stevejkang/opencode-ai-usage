@@ -137,9 +137,9 @@ During initial load:
 - **Plugin not showing**: Verify `tui.json` exists at `~/.config/opencode/tui.json` and contains the plugin entry. Restart OpenCode after editing. Send a chat message — the sidebar renders only after the first message.
 - **Provider section missing**: That provider was not detected. Check its requirements in the table above.
 - **"Loading in Ns..."**: Initial load in progress. Data appears once the provider responds.
-- **"Failed to fetch usage"**: The provider's API returned an error. This usually resolves on the next refresh cycle.
-- **Data not updating**: Default refresh intervals are 60s (Claude) and 30s (OpenAI). Wait or lower `refreshInterval` in options.
-- **Stale data badge ("updated Xm ago")**: The provider hasn't refreshed in over twice the refresh interval. Usually clears on the next successful fetch.
+- **"Failed to fetch usage"**: The provider's API returned an error. After a failure, all OpenCode windows wait before retrying, doubling the wait up to 15 minutes. A rate limit (HTTP 429) can pause refreshes for up to an hour.
+- **Data not updating**: Default refresh intervals are 60s (Claude), 30s (OpenAI), and 60s (OpenCode Go). OpenCode windows share one cache, so only one window calls each provider per interval and the others show its result.
+- **Stale data badge ("updated Xm ago")**: The provider hasn't refreshed in over twice the refresh interval, usually because of the failure backoff above or after the computer wakes from sleep. Clears on the next successful fetch.
 
 ## Uninstall
 
