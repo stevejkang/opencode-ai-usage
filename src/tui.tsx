@@ -2,8 +2,9 @@
 import { execSync, execFileSync, spawn as nodeSpawn } from "node:child_process";
 import { readFileSync } from "node:fs";
 import { homedir as osHomedir } from "node:os";
-import { createSignal, onMount } from "solid-js";
+import { createSignal, onCleanup, onMount, type JSX } from "solid-js";
 import type { TuiPlugin, TuiPluginModule, TuiSlotContext } from "@opencode-ai/plugin/tui";
+import type { Plugin as V2Plugin } from "@opencode/plugin/tui";
 import type { ColorInput } from "@opentui/core";
 import type {
   DisplayMode,
@@ -86,6 +87,78 @@ function ThinBar(props: { progress: number; filledColor: ColorInput; emptyColor:
   );
 }
 
+/**
+ * OpenCode v2 compiles npm-installed plugins with the plain JSX runtime instead of the Solid
+ * compiler, so component-local signals and `ref={variable}` never update. This bar keeps no
+ * state: the sidebar owns the width, re-renders when it changes, and ignores measurements from
+ * bars already replaced by a newer render.
+ */
+function SharedWidthBar(props: {
+  progress: number;
+  filledColor: ColorInput;
+  emptyColor: ColorInput;
+  width: number;
+  onMeasure: (width: number) => void;
+}) {
+  let ref: any;
+  let disposed = false;
+  onCleanup(() => {
+    disposed = true;
+  });
+
+  const measure = () => {
+    setImmediate(() => {
+      if (disposed) return;
+      const measured = ref?.getLayoutNode?.().getComputedWidth();
+      if (Number.isFinite(measured) && measured > 0) props.onMeasure(measured);
+    });
+  };
+
+  onMount(measure);
+
+  const filled = Math.floor(props.width * Math.max(0, Math.min(1, props.progress)));
+  const remaining = props.width - filled;
+
+  return (
+    <box
+      height={1}
+      flexGrow={1}
+      ref={(el: any) => (ref = el)}
+      flexDirection="row"
+      onSizeChange={measure}
+    >
+      <text fg={props.filledColor} width={filled}>
+        {THIN_FILLED.repeat(filled)}
+      </text>
+      <text fg={props.emptyColor} width={remaining}>
+        {THIN_EMPTY.repeat(remaining)}
+      </text>
+    </box>
+  );
+}
+
+type BarRenderer = (
+  progress: number,
+  filledColor: ColorInput,
+  emptyColor: ColorInput,
+) => JSX.Element;
+
+const renderSelfMeasuredBar: BarRenderer = (progress, filledColor, emptyColor) => (
+  <ThinBar progress={progress} filledColor={filledColor} emptyColor={emptyColor} />
+);
+
+const sharedWidthBarRenderer =
+  (width: number, onMeasure: (width: number) => void): BarRenderer =>
+  (progress, filledColor, emptyColor) => (
+    <SharedWidthBar
+      progress={progress}
+      filledColor={filledColor}
+      emptyColor={emptyColor}
+      width={width}
+      onMeasure={onMeasure}
+    />
+  );
+
 interface CreditShape {
   isEnabled: boolean;
   monthlyLimit: number | null;
@@ -125,6 +198,7 @@ function renderWindowRow(
   fg: ColorInput,
   dim: ColorInput,
   pad: number,
+  renderBar: BarRenderer,
 ) {
   const displayPct = computeDisplayPercent(w.percent, showRemaining);
   const pctColor = !w.isActive ? dim : getPercentColor(displayPct, VALUE_COLOR, showRemaining);
@@ -141,7 +215,7 @@ function renderWindowRow(
           </box>
           <box height={1} flexDirection="row">
             <text fg={dim}> </text>
-            <ThinBar progress={0} filledColor={dim} emptyColor={dim} />
+            {renderBar(0, dim, dim)}
             <text fg={dim}>{` ${formatPercentage(toPercent(0)).padStart(4)}`}</text>
           </box>
         </box>
@@ -182,7 +256,7 @@ function renderWindowRow(
         </box>
         <box height={1} flexDirection="row">
           <text> </text>
-          <ThinBar progress={progress} filledColor={pctColor} emptyColor={dim} />
+          {renderBar(progress, pctColor, dim)}
           <text fg={pctColor}>{` ${formatPercentage(displayPct).padStart(4)}`}</text>
         </box>
       </box>
@@ -223,6 +297,7 @@ function renderCreditRow(
   fg: ColorInput,
   dim: ColorInput,
   pad: number,
+  renderBar: BarRenderer,
 ) {
   const display = formatCreditDisplay(credit.usedCredits, credit.monthlyLimit, credit.currency);
   if (!display) return null;
@@ -243,7 +318,7 @@ function renderCreditRow(
           </box>
           <box height={1} flexDirection="row">
             <text fg={dim}> </text>
-            <ThinBar progress={0} filledColor={dim} emptyColor={dim} />
+            {renderBar(0, dim, dim)}
             <text fg={dim}>{` ${formatPercentage(toPercent(0)).padStart(4)}`}</text>
           </box>
         </box>
@@ -283,7 +358,7 @@ function renderCreditRow(
         </box>
         <box height={1} flexDirection="row">
           <text> </text>
-          <ThinBar progress={progress} filledColor={creditColor} emptyColor={dim} />
+          {renderBar(progress, creditColor, dim)}
           <text fg={creditColor}>{` ${formatPercentage(displayPct).padStart(4)}`}</text>
         </box>
       </box>
@@ -316,7 +391,14 @@ function renderCreditRow(
   );
 }
 
-const tui: TuiPlugin = async (api, rawOptions, _meta) => {
+type BarMode = "self-measured" | "shared-width";
+
+interface UsageInstance {
+  renderSidebar: (fg: ColorInput, dim: ColorInput, bar: BarMode) => JSX.Element | null;
+  dispose: () => void;
+}
+
+async function startUsage(rawOptions: unknown): Promise<UsageInstance> {
   const options = (rawOptions as PluginOptions | undefined) ?? {};
   const displayMode: DisplayMode = options.displayMode ?? "mixed";
   const showRemaining = options.showRemaining ?? false;
@@ -484,14 +566,149 @@ const tui: TuiPlugin = async (api, rawOptions, _meta) => {
     ? setInterval(watchStale, STALE_WATCH_INTERVAL_MS)
     : null;
 
-  api.lifecycle.onDispose(() => {
+  const dispose = () => {
     log("plugin.dispose");
     controller.abort();
     if (staleWatcher) clearInterval(staleWatcher);
     for (const timer of tickTimers) {
       if (timer) clearInterval(timer);
     }
-  });
+  };
+
+  const [sharedBarWidth, setSharedBarWidth] = createSignal(0);
+
+  const renderSidebar = (fg: ColorInput, dim: ColorInput, bar: BarMode) => {
+    const active = runtimes.filter((r) => r.detected);
+
+    return active.length === 0 ? null : (
+      <box flexDirection="column">
+        {active.map((rt, idx) => {
+          const s = rt.state();
+          const renderBar =
+            bar === "shared-width"
+              ? sharedWidthBarRenderer(sharedBarWidth(), setSharedBarWidth)
+              : renderSelfMeasuredBar;
+          const now = Date.now();
+          const vis = computeSectionVisibility({
+            hasData: s.lastFetchedAt !== null,
+            error: s.error,
+            lastFetchedAt: s.lastFetchedAt,
+            refreshIntervalMs: rt.refreshIntervalMs,
+            now,
+          });
+          const isOpen = rt.open();
+
+          const renderedStale = vis.kind === "data" ? vis.staleText : null;
+          if ((renderedStaleText.get(rt.provider.id) ?? null) !== renderedStale) {
+            renderedStaleText.set(rt.provider.id, renderedStale);
+            log("render.stale_changed", {
+              staleText: renderedStale,
+              visibility: vis.kind,
+              ...staleFields(rt, now),
+            });
+          }
+
+          const header = (
+            <box height={1} flexDirection="row" onMouseDown={rt.toggleOpen}>
+              <text fg={rt.headerColor}>
+                <b>
+                  {isOpen ? "\u25BC" : "\u25B6"} {rt.provider.displayName}
+                </b>
+              </text>
+              {vis.kind === "data" && vis.staleText ? (
+                <text fg={dim}>{`  ${vis.staleText}`}</text>
+              ) : null}
+            </box>
+          );
+
+          if (vis.kind === "loading") {
+            const cd = rt.countdown();
+            const msg = cd > 0 ? `Loading in ${cd}s...` : "Loading shortly...";
+            return (
+              <box flexDirection="column" marginTop={idx > 0 ? 1 : 0}>
+                {header}
+                {isOpen ? (
+                  <box height={1}>
+                    <text fg={dim}>{` ${msg}`}</text>
+                  </box>
+                ) : null}
+              </box>
+            );
+          }
+
+          if (vis.kind === "error") {
+            return (
+              <box flexDirection="column" marginTop={idx > 0 ? 1 : 0}>
+                {header}
+                {isOpen ? (
+                  <box height={1}>
+                    <text fg={dim}>{" Failed to fetch usage"}</text>
+                  </box>
+                ) : null}
+              </box>
+            );
+          }
+
+          const windows = s.windows;
+          const profile = s.profile;
+          const creditExtras = extractCreditExtras(s.extras);
+
+          const allLabels = windows.map((w) => w.label);
+          if (creditExtras) allLabels.push("Credit");
+          const maxLen = allLabels.length > 0 ? Math.max(...allLabels.map((l) => l.length)) : 0;
+          const pad = displayMode === "bar" ? Math.max(maxLen + 1, 8) : Math.max(maxLen + 2, 9);
+
+          return (
+            <box flexDirection="column" marginTop={idx > 0 ? 1 : 0}>
+              {header}
+              {isOpen ? (
+                <box flexDirection="column">
+                  {profile?.email ? (
+                    <box height={1}>
+                      <text fg={dim}>{` ${profile.email}`}</text>
+                    </box>
+                  ) : null}
+
+                  {windows.map((w) =>
+                    renderWindowRow(w, displayMode, showRemaining, fg, dim, pad, renderBar),
+                  )}
+
+                  {creditExtras
+                    ? renderCreditRow(
+                        creditExtras,
+                        displayMode,
+                        showRemaining,
+                        fg,
+                        dim,
+                        pad,
+                        renderBar,
+                      )
+                    : null}
+
+                  {rt.provider.renderExpanded
+                    ? rt.provider.renderExpanded(
+                        {
+                          theme: { text: fg, textMuted: dim } as unknown as TuiTheme,
+                          options,
+                        },
+                        s.extras,
+                      )
+                    : null}
+                </box>
+              ) : null}
+            </box>
+          );
+        })}
+      </box>
+    );
+  };
+
+  return { renderSidebar, dispose };
+}
+
+const tui: TuiPlugin = async (api, rawOptions, _meta) => {
+  const usage = await startUsage(rawOptions);
+  api.lifecycle.onDispose(usage.dispose);
 
   api.slots.register({
     order: 60,
@@ -499,133 +716,32 @@ const tui: TuiPlugin = async (api, rawOptions, _meta) => {
       // opentui-ref-carveout: sidebar_content slot return type incompatible with @opentui/solid JSX
       sidebar_content(ctx: TuiSlotContext, _props: unknown) {
         const t = ctx.theme.current;
-        const dim: ColorInput = t.textMuted ?? "#546E7A";
-        const fg: ColorInput = t.text ?? "#EEFFFF";
-
-        const active = runtimes.filter((r) => r.detected);
-
-        const content =
-          active.length === 0 ? null : (
-            <box flexDirection="column">
-              {active.map((rt, idx) => {
-                const s = rt.state();
-                const now = Date.now();
-                const vis = computeSectionVisibility({
-                  hasData: s.lastFetchedAt !== null,
-                  error: s.error,
-                  lastFetchedAt: s.lastFetchedAt,
-                  refreshIntervalMs: rt.refreshIntervalMs,
-                  now,
-                });
-                const isOpen = rt.open();
-
-                const renderedStale = vis.kind === "data" ? vis.staleText : null;
-                if ((renderedStaleText.get(rt.provider.id) ?? null) !== renderedStale) {
-                  renderedStaleText.set(rt.provider.id, renderedStale);
-                  log("render.stale_changed", {
-                    staleText: renderedStale,
-                    visibility: vis.kind,
-                    ...staleFields(rt, now),
-                  });
-                }
-
-                const header = (
-                  <box height={1} flexDirection="row" onMouseDown={rt.toggleOpen}>
-                    <text fg={rt.headerColor}>
-                      <b>
-                        {isOpen ? "\u25BC" : "\u25B6"} {rt.provider.displayName}
-                      </b>
-                    </text>
-                    {vis.kind === "data" && vis.staleText ? (
-                      <text fg={dim}>{`  ${vis.staleText}`}</text>
-                    ) : null}
-                  </box>
-                );
-
-                if (vis.kind === "loading") {
-                  const cd = rt.countdown();
-                  const msg = cd > 0 ? `Loading in ${cd}s...` : "Loading shortly...";
-                  return (
-                    <box flexDirection="column" marginTop={idx > 0 ? 1 : 0}>
-                      {header}
-                      {isOpen ? (
-                        <box height={1}>
-                          <text fg={dim}>{` ${msg}`}</text>
-                        </box>
-                      ) : null}
-                    </box>
-                  );
-                }
-
-                if (vis.kind === "error") {
-                  return (
-                    <box flexDirection="column" marginTop={idx > 0 ? 1 : 0}>
-                      {header}
-                      {isOpen ? (
-                        <box height={1}>
-                          <text fg={dim}>{" Failed to fetch usage"}</text>
-                        </box>
-                      ) : null}
-                    </box>
-                  );
-                }
-
-                const windows = s.windows;
-                const profile = s.profile;
-                const creditExtras = extractCreditExtras(s.extras);
-
-                const allLabels = windows.map((w) => w.label);
-                if (creditExtras) allLabels.push("Credit");
-                const maxLen =
-                  allLabels.length > 0 ? Math.max(...allLabels.map((l) => l.length)) : 0;
-                const pad =
-                  displayMode === "bar" ? Math.max(maxLen + 1, 8) : Math.max(maxLen + 2, 9);
-
-                return (
-                  <box flexDirection="column" marginTop={idx > 0 ? 1 : 0}>
-                    {header}
-                    {isOpen ? (
-                      <box flexDirection="column">
-                        {profile?.email ? (
-                          <box height={1}>
-                            <text fg={dim}>{` ${profile.email}`}</text>
-                          </box>
-                        ) : null}
-
-                        {windows.map((w) =>
-                          renderWindowRow(w, displayMode, showRemaining, fg, dim, pad),
-                        )}
-
-                        {creditExtras
-                          ? renderCreditRow(creditExtras, displayMode, showRemaining, fg, dim, pad)
-                          : null}
-
-                        {rt.provider.renderExpanded
-                          ? rt.provider.renderExpanded(
-                              {
-                                theme: { text: fg, textMuted: dim } as unknown as TuiTheme,
-                                options,
-                              },
-                              s.extras,
-                            )
-                          : null}
-                      </box>
-                    ) : null}
-                  </box>
-                );
-              })}
-            </box>
-          );
-
-        return content as any;
+        return usage.renderSidebar(
+          t.text ?? "#EEFFFF",
+          t.textMuted ?? "#546E7A",
+          "self-measured",
+        ) as any;
       },
     },
   });
 };
 
-const plugin: TuiPluginModule & { id: string } = {
+const setup = async (ctx: V2Plugin.Context) => {
+  const usage = await startUsage(ctx.options);
+  ctx.ui.slot({
+    append: "sidebar.content",
+    render: () => usage.renderSidebar(ctx.theme.text.base, ctx.theme.text.muted, "shared-width"),
+  });
+  return usage.dispose;
+};
+
+/**
+ * Serves both OpenCode hosts from one module: V1 calls `tui`, V2 calls `setup`.
+ */
+const plugin: TuiPluginModule & V2Plugin.Definition = {
   id: "opencode-ai-usage",
   tui,
+  setup,
 };
 
 export default plugin;

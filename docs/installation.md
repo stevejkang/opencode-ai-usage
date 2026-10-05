@@ -9,9 +9,31 @@ An OpenCode TUI sidebar plugin that displays AI provider usage in one unified si
 ## Prerequisites
 
 - [OpenCode](https://opencode.ai) installed and working
-- Plugin support (`@opencode-ai/plugin` >= 1.4.3)
+- OpenCode v1 (`@opencode-ai/plugin` >= 1.4.3) or OpenCode v2 (>= 2.0.20)
 
-## Step 1: Configure the TUI plugin
+## Step 0: Detect the OpenCode major version
+
+Run `opencode --version`.
+
+- Output like `1.17.13` → follow **Step 1 (OpenCode v1)**.
+- Output like `opencode v2.0.20` → follow **Step 1 (OpenCode v2)**.
+
+## Step 1 (OpenCode v2): Configure the CLI plugin
+
+Edit `~/.config/opencode/cli.json`. Create the file if it doesn't exist. Do not edit `tui.json` on OpenCode v2; it is no longer read.
+
+Add `{ "package": "opencode-ai-usage", "options": {} }` to the `plugins` array, appending to any existing entries:
+
+```json
+{
+  "$schema": "https://opencode.ai/v2/cli.json",
+  "plugins": [{ "package": "opencode-ai-usage", "options": {} }]
+}
+```
+
+Skip Step 1 (OpenCode v1) and continue at **Options** to customize the plugin, or at **Step 2** to keep the defaults.
+
+## Step 1 (OpenCode v1): Configure the TUI plugin
 
 Edit `~/.config/opencode/tui.json`. Create the file if it doesn't exist.
 
@@ -36,27 +58,60 @@ Add `["opencode-ai-usage", { "enabled": true }]` to the `plugin` array:
 }
 ```
 
-### Options
+## Options
 
-All options are optional. Defaults shown:
+All options are optional, and the option names and values are the same on OpenCode v1 and v2. Only the surrounding entry differs. Defaults shown:
+
+**OpenCode v2** — `~/.config/opencode/cli.json`, inside the entry's `options` object:
 
 ```json
-[
-  "opencode-ai-usage",
-  {
-    "enabled": true,
-    "disabledProviders": [],
-    "displayMode": "mixed",
-    "showRemaining": false,
-    "debugLog": { "enabled": false, "retentionDays": 7, "maxFileSizeMB": 10 },
-    "providers": {
-      "claude": { "refreshInterval": 60, "headerColor": "#E07A3A" },
-      "openai": { "refreshInterval": 30, "headerColor": "#10A37F" },
-      "opencode-go": { "refreshInterval": 60, "headerColor": "#FDFCFC" }
+{
+  "$schema": "https://opencode.ai/v2/cli.json",
+  "plugins": [
+    {
+      "package": "opencode-ai-usage",
+      "options": {
+        "disabledProviders": [],
+        "displayMode": "mixed",
+        "showRemaining": false,
+        "debugLog": { "enabled": false, "retentionDays": 7, "maxFileSizeMB": 10 },
+        "providers": {
+          "claude": { "refreshInterval": 60, "headerColor": "#E07A3A" },
+          "openai": { "refreshInterval": 30, "headerColor": "#10A37F" },
+          "opencode-go": { "refreshInterval": 60, "headerColor": "#FDFCFC" }
+        }
+      }
     }
-  }
-]
+  ]
+}
 ```
+
+**OpenCode v1** — `~/.config/opencode/tui.json`, as the second element of the plugin tuple:
+
+```json
+{
+  "$schema": "https://opencode.ai/tui.json",
+  "plugin": [
+    [
+      "opencode-ai-usage",
+      {
+        "enabled": true,
+        "disabledProviders": [],
+        "displayMode": "mixed",
+        "showRemaining": false,
+        "debugLog": { "enabled": false, "retentionDays": 7, "maxFileSizeMB": 10 },
+        "providers": {
+          "claude": { "refreshInterval": 60, "headerColor": "#E07A3A" },
+          "openai": { "refreshInterval": 30, "headerColor": "#10A37F" },
+          "opencode-go": { "refreshInterval": 60, "headerColor": "#FDFCFC" }
+        }
+      }
+    ]
+  ]
+}
+```
+
+`enabled` is an OpenCode v1 plugin toggle, not a plugin option; do not add it on OpenCode v2.
 
 | Option                           | Default   | Description                                                                         |
 | -------------------------------- | --------- | ----------------------------------------------------------------------------------- |
@@ -71,7 +126,7 @@ All options are optional. Defaults shown:
 
 Provider IDs currently available: `claude`, `openai`, `opencode-go`.
 
-#### `displayMode`
+### `displayMode`
 
 **Text mode** (`"displayMode": "text"`):
 
@@ -91,7 +146,7 @@ Provider IDs currently available: `claude`, `openai`, `opencode-go`.
  Weekly   ██░░░░░░░░░░░░  11% (4d 5h)
 ```
 
-#### `showRemaining`
+### `showRemaining`
 
 By default, bars and percentages track how much of a window you've _used_. Setting `showRemaining: true` flips the math: bars fill with what's left, and the percentage shown is `100 - used%`. Color grading flips with it, going from a calm default toward warning and danger colors as the remaining amount shrinks, rather than as usage grows.
 
@@ -138,7 +193,7 @@ During initial load:
 
 ## Troubleshooting
 
-- **Plugin not showing**: Verify `tui.json` exists at `~/.config/opencode/tui.json` and contains the plugin entry. Restart OpenCode after editing. Send a chat message — the sidebar renders only after the first message.
+- **Plugin not showing**: Verify the plugin entry exists in `~/.config/opencode/tui.json` (OpenCode v1) or `~/.config/opencode/cli.json` (OpenCode v2). On OpenCode v2, `opencode plugin list` should list it. Restart OpenCode after editing. Send a chat message — the sidebar renders only after the first message.
 - **Provider section missing**: That provider was not detected. Check its requirements in the table above.
 - **"Loading in Ns..."**: Initial load in progress. Data appears once the provider responds.
 - **"Failed to fetch usage"**: The provider's API returned an error. After a failure, all OpenCode windows wait before retrying, doubling the wait up to 15 minutes. A rate limit (HTTP 429) can pause refreshes for up to an hour.
@@ -148,6 +203,11 @@ During initial load:
 
 ## Uninstall
 
-1. Remove `["opencode-ai-usage", { "enabled": true }]` from `~/.config/opencode/tui.json` plugin array
+1. Remove the `opencode-ai-usage` entry from `~/.config/opencode/tui.json` (OpenCode v1) or `~/.config/opencode/cli.json` (OpenCode v2)
 2. Restart OpenCode
-3. Optionally delete cache: `rm -rf ~/.cache/opencode-ai-usage/`
+3. Optionally delete the plugin's cache and debug logs (same path on v1 and v2): `rm -rf ~/.cache/opencode-ai-usage/`
+4. Optionally delete OpenCode's downloaded copy of the package:
+   - OpenCode v1: `rm -rf ~/.cache/opencode/packages/opencode-ai-usage@*`
+   - OpenCode v2: `rm -rf ~/.cache/opencode/npm/opencode-ai-usage@*`
+
+   Do not delete `~/.cache/opencode/` itself; it also holds other plugins and model data.

@@ -37,7 +37,9 @@ https://raw.githubusercontent.com/stevejkang/opencode-ai-usage/refs/heads/main/d
 
 ### Manual setup
 
-**`~/.config/opencode/tui.json`**
+The same package works on OpenCode v1 and OpenCode v2. Only the config file differs.
+
+**OpenCode v1** — `~/.config/opencode/tui.json`
 
 ```json
 {
@@ -46,7 +48,18 @@ https://raw.githubusercontent.com/stevejkang/opencode-ai-usage/refs/heads/main/d
 }
 ```
 
+**OpenCode v2** — `~/.config/opencode/cli.json`
+
+```json
+{
+  "$schema": "https://opencode.ai/v2/cli.json",
+  "plugins": [{ "package": "opencode-ai-usage", "options": {} }]
+}
+```
+
 ### Local path
+
+OpenCode v1:
 
 ```json
 {
@@ -55,7 +68,18 @@ https://raw.githubusercontent.com/stevejkang/opencode-ai-usage/refs/heads/main/d
 }
 ```
 
+OpenCode v2 (points at the repository directory, which exposes a root `tui.ts`):
+
+```json
+{
+  "$schema": "https://opencode.ai/v2/cli.json",
+  "plugins": [{ "package": "/path/to/opencode-ai-usage", "options": {} }]
+}
+```
+
 ## Options
+
+Shown in OpenCode v1 form. On OpenCode v2, put the same object under `options` of the `cli.json` entry.
 
 ```json
 {
@@ -128,7 +152,7 @@ Providers are detected automatically on startup. If a provider's requirements ar
 
 ## Requirements
 
-- [OpenCode](https://opencode.ai) with plugin support (`@opencode-ai/plugin` >= 1.4.3)
+- [OpenCode](https://opencode.ai) v1 with plugin support (`@opencode-ai/plugin` >= 1.4.3), or OpenCode v2 (`@opencode/plugin` >= 2.0.20)
 
 ## Development
 
