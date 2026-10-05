@@ -34,8 +34,8 @@
     "format:check": "oxfmt --check ."
   },
   "dependencies": {
-    "@opentui/core": "^0.4.5",
-    "@opentui/solid": "^0.4.5",
+    "@opentui/core": "^0.5.14",
+    "@opentui/solid": "^0.5.14",
     "solid-js": "^1.9.12"
   },
   "devDependencies": {
