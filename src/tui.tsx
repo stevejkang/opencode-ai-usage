@@ -58,38 +58,9 @@ const THIN_FILLED = "━";
 const THIN_EMPTY = "─";
 const VALUE_COLOR = "#82AAFF";
 
-function ThinBar(props: { progress: number; filledColor: ColorInput; emptyColor: ColorInput }) {
-  let ref!: any;
-  const [width, setWidth] = createSignal(0);
-
-  const measure = () => {
-    setImmediate(() => {
-      if (ref?.getLayoutNode) {
-        setWidth(ref.getLayoutNode().getComputedWidth());
-      }
-    });
-  };
-
-  onMount(measure);
-
-  const filled = () => Math.floor(width() * Math.max(0, Math.min(1, props.progress)));
-  const remaining = () => width() - filled();
-
-  return (
-    <box height={1} flexGrow={1} ref={ref} flexDirection="row" onSizeChange={measure}>
-      <text fg={props.filledColor} width={filled()}>
-        {THIN_FILLED.repeat(filled())}
-      </text>
-      <text fg={props.emptyColor} width={remaining()}>
-        {THIN_EMPTY.repeat(remaining())}
-      </text>
-    </box>
-  );
-}
-
 /**
- * OpenCode v2 compiles npm-installed plugins with the plain JSX runtime instead of the Solid
- * compiler, so component-local signals and `ref={variable}` never update. This bar keeps no
+ * OpenCode v1 and v2 both compile npm-installed plugins with the plain JSX runtime instead of the
+ * Solid compiler, so component-local signals and `ref={variable}` never update. This bar keeps no
  * state: the sidebar owns the width, re-renders when it changes, and ignores measurements from
  * bars already replaced by a newer render.
  */
@@ -142,10 +113,6 @@ type BarRenderer = (
   filledColor: ColorInput,
   emptyColor: ColorInput,
 ) => JSX.Element;
-
-const renderSelfMeasuredBar: BarRenderer = (progress, filledColor, emptyColor) => (
-  <ThinBar progress={progress} filledColor={filledColor} emptyColor={emptyColor} />
-);
 
 const sharedWidthBarRenderer =
   (width: number, onMeasure: (width: number) => void): BarRenderer =>
@@ -391,10 +358,8 @@ function renderCreditRow(
   );
 }
 
-type BarMode = "self-measured" | "shared-width";
-
 interface UsageInstance {
-  renderSidebar: (fg: ColorInput, dim: ColorInput, bar: BarMode) => JSX.Element | null;
+  renderSidebar: (fg: ColorInput, dim: ColorInput) => JSX.Element | null;
   dispose: () => void;
 }
 
@@ -577,17 +542,14 @@ async function startUsage(rawOptions: unknown): Promise<UsageInstance> {
 
   const [sharedBarWidth, setSharedBarWidth] = createSignal(0);
 
-  const renderSidebar = (fg: ColorInput, dim: ColorInput, bar: BarMode) => {
+  const renderSidebar = (fg: ColorInput, dim: ColorInput) => {
     const active = runtimes.filter((r) => r.detected);
 
     return active.length === 0 ? null : (
       <box flexDirection="column">
         {active.map((rt, idx) => {
           const s = rt.state();
-          const renderBar =
-            bar === "shared-width"
-              ? sharedWidthBarRenderer(sharedBarWidth(), setSharedBarWidth)
-              : renderSelfMeasuredBar;
+          const renderBar = sharedWidthBarRenderer(sharedBarWidth(), setSharedBarWidth);
           const now = Date.now();
           const vis = computeSectionVisibility({
             hasData: s.lastFetchedAt !== null,
@@ -716,11 +678,7 @@ const tui: TuiPlugin = async (api, rawOptions, _meta) => {
       // opentui-ref-carveout: sidebar_content slot return type incompatible with @opentui/solid JSX
       sidebar_content(ctx: TuiSlotContext, _props: unknown) {
         const t = ctx.theme.current;
-        return usage.renderSidebar(
-          t.text ?? "#EEFFFF",
-          t.textMuted ?? "#546E7A",
-          "self-measured",
-        ) as any;
+        return usage.renderSidebar(t.text ?? "#EEFFFF", t.textMuted ?? "#546E7A") as any;
       },
     },
   });
@@ -730,7 +688,7 @@ const setup = async (ctx: V2Plugin.Context) => {
   const usage = await startUsage(ctx.options);
   ctx.ui.slot({
     append: "sidebar.content",
-    render: () => usage.renderSidebar(ctx.theme.text.base, ctx.theme.text.muted, "shared-width"),
+    render: () => usage.renderSidebar(ctx.theme.text.base, ctx.theme.text.muted),
   });
   return usage.dispose;
 };
