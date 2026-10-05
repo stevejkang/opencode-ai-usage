@@ -1,6 +1,6 @@
 {
   "name": "opencode-ai-usage",
-  "version": "0.0.1-rc.1",
+  "version": "0.0.1-rc.2",
   "description": "OpenCode TUI sidebar plugin displaying multi-provider AI usage statistics",
   "keywords": [
     "claude",
