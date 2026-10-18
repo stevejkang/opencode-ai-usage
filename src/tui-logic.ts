@@ -4,15 +4,18 @@ import { toPercent } from "./types";
 export type SectionVisibility =
   | { kind: "loading" }
   | { kind: "data"; staleText: string | null }
-  | { kind: "error"; message: string };
+  | { kind: "error"; message: string }
+  | { kind: "action-required"; message: string };
 
 export function computeSectionVisibility(input: {
   hasData: boolean;
   error: string | null;
+  actionRequired?: string | null;
   lastFetchedAt: number | null;
   refreshIntervalMs: number;
   now: number;
 }): SectionVisibility {
+  if (input.actionRequired) return { kind: "action-required", message: input.actionRequired };
   if (!input.hasData && input.error === null) return { kind: "loading" };
   if (!input.hasData && input.error !== null) return { kind: "error", message: input.error };
   const staleText = computeStaleText(input.lastFetchedAt!, input.refreshIntervalMs, input.now);

@@ -292,6 +292,46 @@ describe("createCacheStore", () => {
     });
   });
 
+  describe("action required", () => {
+    it("persists past the backoff and through pruning until the backoff is cleared", async () => {
+      let currentTime = frozenNow;
+      const store = createCacheStore({ cacheDir: tmpDir, now: () => currentTime });
+
+      await store.setBackoff("opencode-go", {
+        nextAttemptAt: frozenNow + 60_000,
+        failureStreak: 1,
+        actionRequired: "API key expired",
+      });
+      currentTime = frozenNow + 120_000;
+      await store.write("openai", "a@test.com", makeEntry({ timestamp: currentTime }));
+
+      expect(store.getBackoff("opencode-go")).toEqual({
+        nextAttemptAt: null,
+        failureStreak: 1,
+        actionRequired: "API key expired",
+      });
+
+      await store.setBackoff("opencode-go", null);
+      expect(store.getBackoff("opencode-go")).toEqual({ nextAttemptAt: null, failureStreak: 0 });
+    });
+
+    it("is dropped when a later failure no longer requires action", async () => {
+      const store = createCacheStore({ cacheDir: tmpDir, now: () => frozenNow });
+
+      await store.setBackoff("opencode-go", {
+        nextAttemptAt: frozenNow + 60_000,
+        failureStreak: 1,
+        actionRequired: "API key expired",
+      });
+      await store.setBackoff("opencode-go", {
+        nextAttemptAt: frozenNow + 60_000,
+        failureStreak: 2,
+      });
+
+      expect(store.getBackoff("opencode-go").actionRequired).toBeUndefined();
+    });
+  });
+
   describe("fetch lock", () => {
     it("grants the lock to one holder until it is released", () => {
       const a = createCacheStore({ cacheDir: tmpDir, now: () => frozenNow });

@@ -94,11 +94,13 @@ export interface ProviderCache {
   accounts: Record<string, AccountCache>;
   nextAttemptAt?: number;
   failureStreak?: number;
+  actionRequired?: string;
 }
 
 export interface FetchBackoff {
   nextAttemptAt: number | null;
   failureStreak: number;
+  actionRequired?: string;
 }
 
 export interface AccountCache {
@@ -150,6 +152,7 @@ export interface RefreshState {
   profile: ProviderProfile | null;
   extras: unknown | null;
   error: string | null;
+  actionRequired: string | null;
   lastFetchedAt: number | null;
 }
 
@@ -157,12 +160,27 @@ export type ProviderFetchErrorInfo =
   | { kind: "http"; status: number; retryAfterS?: number }
   | { kind: "network" };
 
+export interface ProviderFetchErrorOptions {
+  /**
+   * Short instruction shown in the sidebar. Set it only when the failure cannot recover
+   * without the user acting (e.g. an expired API key); transient failures such as rate
+   * limits or network errors must leave it unset so they never surface in the UI.
+   */
+  actionRequired?: string;
+}
+
 export class ProviderFetchError extends Error {
   readonly info: ProviderFetchErrorInfo;
+  readonly actionRequired: string | null;
 
-  constructor(message: string, info: ProviderFetchErrorInfo) {
+  constructor(
+    message: string,
+    info: ProviderFetchErrorInfo,
+    options: ProviderFetchErrorOptions = {},
+  ) {
     super(message);
     this.name = "ProviderFetchError";
     this.info = info;
+    this.actionRequired = options.actionRequired ?? null;
   }
 }

@@ -622,6 +622,7 @@ describe("multi-provider integration", () => {
 
       const limited = await tracker.waitFor(1);
       expect(limited.error).toBe("rate limited");
+      expect(limited.actionRequired).toBeNull();
       expect(cache.getBackoff("test")).toEqual({
         nextAttemptAt: FROZEN_NOW + 120_000,
         failureStreak: 1,
@@ -996,6 +997,77 @@ describe("multi-provider integration", () => {
       expect(adopted.error).toBeNull();
       expect(adopted.windows).toEqual(makeWindows(10));
       expect(adopted.lastFetchedAt).toBe(FROZEN_NOW + 60_000);
+
+      ac.abort();
+    });
+
+    it("surfaces an action-required failure to every process and clears it after a fix", async () => {
+      vi.useFakeTimers({ now: FROZEN_NOW });
+
+      const cache = createCacheStore({ cacheDir: tmpDir, now: () => Date.now() });
+      const deps = makeFakeDeps({ now: () => Date.now() });
+      const expired = new ProviderFetchError(
+        "key rejected",
+        { kind: "http", status: 401 },
+        { actionRequired: "API key expired" },
+      );
+      let keyReplaced = false;
+      const fetchA = vi.fn<ProviderDefinition["fetch"]>().mockImplementation(() =>
+        keyReplaced
+          ? Promise.resolve({
+              accountKey: null,
+              windows: makeWindows(5),
+              profile: null,
+              extras: null,
+            })
+          : Promise.reject(expired),
+      );
+      const fetchB = vi.fn<ProviderDefinition["fetch"]>().mockRejectedValue(expired);
+      const trackerA = createStateTracker();
+      const trackerB = createStateTracker();
+      const ac = new AbortController();
+
+      createRefreshLoop({
+        provider: makeFakeProvider("opencode-go", fetchA),
+        deps,
+        cache,
+        signal: ac.signal,
+        intervalMs: 60_000,
+        setState: trackerA.setState,
+      });
+      const failedA = await trackerA.waitFor(1);
+      expect(failedA.actionRequired).toBe("API key expired");
+      expect(cache.getBackoff("opencode-go")).toEqual({
+        nextAttemptAt: FROZEN_NOW + 60_000,
+        failureStreak: 1,
+        actionRequired: "API key expired",
+      });
+
+      createRefreshLoop({
+        provider: makeFakeProvider("opencode-go", fetchB),
+        deps,
+        cache,
+        signal: ac.signal,
+        intervalMs: 60_000,
+        setState: trackerB.setState,
+      });
+      const waitingB = await trackerB.waitFor(1);
+      expect(fetchB).not.toHaveBeenCalled();
+      expect(waitingB.actionRequired).toBe("API key expired");
+      expect(waitingB.lastFetchedAt).toBeNull();
+
+      keyReplaced = true;
+      await vi.advanceTimersByTimeAsync(60_000);
+      const recoveredA = await trackerA.waitFor(2);
+      expect(recoveredA.actionRequired).toBeNull();
+      expect(recoveredA.windows).toEqual(makeWindows(5));
+      expect(cache.getBackoff("opencode-go")).toEqual({ nextAttemptAt: null, failureStreak: 0 });
+
+      await vi.advanceTimersByTimeAsync(5_000);
+      const recoveredB = await trackerB.waitFor(2);
+      expect(recoveredB.actionRequired).toBeNull();
+      expect(recoveredB.windows).toEqual(makeWindows(5));
+      expect(fetchB).not.toHaveBeenCalled();
 
       ac.abort();
     });

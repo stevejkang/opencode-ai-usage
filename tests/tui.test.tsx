@@ -34,6 +34,18 @@ describe("computeSectionVisibility", () => {
     expect(result).toEqual({ kind: "error", message: "Network failure" });
   });
 
+  it("returns action-required over cached data when the user must act", () => {
+    const result = computeSectionVisibility({
+      hasData: true,
+      error: "API key expired",
+      actionRequired: "API key expired",
+      lastFetchedAt: BASE_TIME - 30_000,
+      refreshIntervalMs: INTERVAL_MS,
+      now: BASE_TIME,
+    });
+    expect(result).toEqual({ kind: "action-required", message: "API key expired" });
+  });
+
   it("returns data with no stale text when fresh", () => {
     const result = computeSectionVisibility({
       hasData: true,

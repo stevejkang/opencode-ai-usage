@@ -33,6 +33,7 @@ import {
   formatPercentage,
   formatRelativeTime,
   getPercentColor,
+  ACTION_REQUIRED_COLOR,
 } from "./format";
 import { createClaudeProvider } from "./providers/claude";
 import { createOpenAIProvider } from "./providers/openai";
@@ -440,6 +441,7 @@ async function startUsage(rawOptions: unknown): Promise<UsageInstance> {
       profile: null,
       extras: null,
       error: null,
+      actionRequired: null,
       lastFetchedAt: null,
     });
     const [open, setOpen] = createSignal(true);
@@ -554,6 +556,7 @@ async function startUsage(rawOptions: unknown): Promise<UsageInstance> {
           const vis = computeSectionVisibility({
             hasData: s.lastFetchedAt !== null,
             error: s.error,
+            actionRequired: s.actionRequired,
             lastFetchedAt: s.lastFetchedAt,
             refreshIntervalMs: rt.refreshIntervalMs,
             now,
@@ -592,6 +595,19 @@ async function startUsage(rawOptions: unknown): Promise<UsageInstance> {
                 {isOpen ? (
                   <box height={1}>
                     <text fg={dim}>{` ${msg}`}</text>
+                  </box>
+                ) : null}
+              </box>
+            );
+          }
+
+          if (vis.kind === "action-required") {
+            return (
+              <box flexDirection="column" marginTop={idx > 0 ? 1 : 0}>
+                {header}
+                {isOpen ? (
+                  <box>
+                    <text fg={ACTION_REQUIRED_COLOR}>{` ${vis.message}`}</text>
                   </box>
                 ) : null}
               </box>

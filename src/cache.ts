@@ -62,7 +62,7 @@ function pruneExpired(schema: CacheSchema, currentTime: number): void {
       }
     }
     const coolingDown = (provider.nextAttemptAt ?? 0) > currentTime;
-    if (Object.keys(provider.accounts).length === 0 && !coolingDown) {
+    if (Object.keys(provider.accounts).length === 0 && !coolingDown && !provider.actionRequired) {
       delete schema.providers[pid];
     }
   }
@@ -163,10 +163,12 @@ export function createCacheStore(deps: CacheStoreDeps = {}): CacheStore {
   function getBackoff(providerId: string): FetchBackoff {
     const provider = readSchemaSync(cachePath).providers[providerId];
     const nextAttemptAt = provider?.nextAttemptAt;
-    return {
+    const backoff: FetchBackoff = {
       nextAttemptAt: nextAttemptAt !== undefined && nextAttemptAt > now() ? nextAttemptAt : null,
       failureStreak: provider?.failureStreak ?? 0,
     };
+    if (provider?.actionRequired) backoff.actionRequired = provider.actionRequired;
+    return backoff;
   }
 
   function setBackoff(providerId: string, backoff: FetchBackoff | null): Promise<void> {
@@ -178,11 +180,14 @@ export function createCacheStore(deps: CacheStoreDeps = {}): CacheStore {
         if (!provider) return;
         delete provider.nextAttemptAt;
         delete provider.failureStreak;
+        delete provider.actionRequired;
       } else {
         const target = provider ?? (schema.providers[providerId] = { accounts: {} });
         if (backoff.nextAttemptAt === null) delete target.nextAttemptAt;
         else target.nextAttemptAt = backoff.nextAttemptAt;
         target.failureStreak = backoff.failureStreak;
+        if (backoff.actionRequired) target.actionRequired = backoff.actionRequired;
+        else delete target.actionRequired;
       }
       await atomicWrite(schema);
     });

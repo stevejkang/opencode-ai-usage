@@ -64,12 +64,18 @@ function rateLimitRetryAfterMs(error: unknown): number | null {
   return (error.info.retryAfterS ?? DEFAULT_RETRY_AFTER_S) * 1000;
 }
 
+function actionRequiredOf(error: unknown): string | null {
+  return error instanceof ProviderFetchError ? error.actionRequired : null;
+}
+
 /**
  * Delay before any process may fetch again after the `streak`-th consecutive failure.
- * A 429's Retry-After is clamped to a probe cap (15m, 30m, then 60m) because the
+ * A failure that needs the user to act is retried every interval instead of backing off
+ * further, so the fix (e.g. a replaced API key) is picked up promptly. A 429's Retry-After is clamped to a probe cap (15m, 30m, then 60m) because the
  * endpoint often lifts much sooner than it advertises; a single lock holder probes it.
  */
 export function failureBackoffMs(error: unknown, streak: number, intervalMs: number): number {
+  if (actionRequiredOf(error) !== null) return intervalMs;
   const retryAfterMs = rateLimitRetryAfterMs(error);
   if (retryAfterMs === null) {
     return Math.min(intervalMs * 2 ** (streak - 1), MAX_FAILURE_BACKOFF_MS);
@@ -136,6 +142,7 @@ export function createRefreshLoop(options: RefreshLoopOptions): RefreshLoopHandl
 
   let lastKnownAccountKey: string = UNKNOWN_ACCOUNT_KEY;
   let lastGoodState: RefreshState | null = null;
+  let shownActionRequired: string | null = null;
 
   const diag: RefreshDiagnostics = {
     phase: "fetching",
@@ -164,9 +171,11 @@ export function createRefreshLoop(options: RefreshLoopOptions): RefreshLoopHandl
       profile: entry.profile,
       extras: entry.extras,
       error: null,
+      actionRequired: null,
       lastFetchedAt: entry.timestamp,
     };
     lastGoodState = state;
+    shownActionRequired = null;
     diag.dataSource = source;
     diag.dataWriterPid = entry.writerPid ?? null;
     setState(state);
@@ -188,6 +197,19 @@ export function createRefreshLoop(options: RefreshLoopOptions): RefreshLoopHandl
       });
     }
     return deps.now() - latest.entry.timestamp;
+  };
+
+  const showActionRequired = (actionRequired: string) => {
+    if (shownActionRequired === actionRequired) return;
+    shownActionRequired = actionRequired;
+    setState({
+      windows: lastGoodState?.windows ?? [],
+      profile: lastGoodState?.profile ?? null,
+      extras: lastGoodState?.extras ?? null,
+      error: actionRequired,
+      actionRequired,
+      lastFetchedAt: lastGoodState?.lastFetchedAt ?? null,
+    });
   };
 
   const scheduleIn = (ms: number, phase: RefreshPhase = "scheduled") => {
@@ -216,6 +238,7 @@ export function createRefreshLoop(options: RefreshLoopOptions): RefreshLoopHandl
     }
 
     const backoff = cache.getBackoff(provider.id);
+    if (backoff.actionRequired) showActionRequired(backoff.actionRequired);
     if (backoff.nextAttemptAt !== null) {
       log("cycle.backoff", {
         provider: provider.id,
@@ -262,9 +285,11 @@ export function createRefreshLoop(options: RefreshLoopOptions): RefreshLoopHandl
         profile: result.profile,
         extras: result.extras,
         error: null,
+        actionRequired: null,
         lastFetchedAt: entry.timestamp,
       };
       lastGoodState = good;
+      shownActionRequired = null;
       diag.lastSuccessAt = entry.timestamp;
       diag.lastError = null;
       diag.consecutiveFailures = 0;
@@ -285,13 +310,19 @@ export function createRefreshLoop(options: RefreshLoopOptions): RefreshLoopHandl
       const failureStreak = backoff.failureStreak + 1;
       const backoffMs = failureBackoffMs(error, failureStreak, intervalMs);
       const nextAttemptAt = deps.now() + backoffMs;
-      await cache.setBackoff(provider.id, { nextAttemptAt, failureStreak });
+      const actionRequired = actionRequiredOf(error);
+      await cache.setBackoff(provider.id, {
+        nextAttemptAt,
+        failureStreak,
+        ...(actionRequired ? { actionRequired } : {}),
+      });
       log("fetch.backoff", {
         provider: provider.id,
         cycle: diag.cycles,
         failureStreak,
         backoffMs,
         nextAttemptAt,
+        actionRequired,
         retryAfterS:
           error instanceof ProviderFetchError && error.info.kind === "http"
             ? (error.info.retryAfterS ?? null)
@@ -317,9 +348,11 @@ export function createRefreshLoop(options: RefreshLoopOptions): RefreshLoopHandl
         durationMs: deps.now() - startedAt,
         error: errorMessage,
         info,
+        actionRequired,
         consecutiveFailures: diag.consecutiveFailures,
       };
 
+      shownActionRequired = actionRequired;
       if (lastGoodState) {
         log("cycle.failure", {
           ...failureFields,
@@ -332,6 +365,7 @@ export function createRefreshLoop(options: RefreshLoopOptions): RefreshLoopHandl
           profile: lastGoodState.profile,
           extras: lastGoodState.extras,
           error: errorMessage,
+          actionRequired,
           lastFetchedAt: lastGoodState.lastFetchedAt,
         });
       } else {
@@ -357,6 +391,7 @@ export function createRefreshLoop(options: RefreshLoopOptions): RefreshLoopHandl
           profile: stale?.profile ?? null,
           extras: stale?.extras ?? null,
           error: errorMessage,
+          actionRequired,
           lastFetchedAt: stale?.timestamp ?? null,
         });
       }

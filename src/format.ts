@@ -8,6 +8,8 @@ const THIN_FILLED_CHAR = "━";
 const THIN_EMPTY_CHAR = "─";
 const HIGH_USAGE_COLOR = "#E07A3A";
 const WARNING_COLOR = "#F0A875";
+
+export const ACTION_REQUIRED_COLOR = WARNING_COLOR;
 const DANGER_COLOR = "#D32F2F";
 
 /** Format a reset timestamp as a relative duration string (e.g. "3h 16m", "2d 5h"). Returns "—" for null. */
