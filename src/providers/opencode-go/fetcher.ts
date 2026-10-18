@@ -1,6 +1,6 @@
 import type { ProviderDeps, FetchResult, DetectionResult, UsageWindow } from "../../types";
 import { toUnixMs, toPercent, ProviderFetchError } from "../../types";
-import type { ApiResponse, AuthJson, WindowMetric } from "./types";
+import type { ApiErrorResponse, ApiResponse, AuthJson, WindowMetric } from "./types";
 import { join } from "node:path";
 
 const USAGE_URL = "https://opencode.ai/zen/go/v1/usage";
@@ -72,6 +72,16 @@ function metricToWindow(key: string, metric: WindowMetric | null | undefined): U
   return { label, percent, resetsAt, isActive };
 }
 
+async function readErrorCode(response: Response): Promise<string | null> {
+  try {
+    const body = (await response.json()) as ApiErrorResponse;
+    const code = typeof body?.error === "object" ? body.error?.code : null;
+    return typeof code === "string" && code.length > 0 ? code : null;
+  } catch {
+    return null;
+  }
+}
+
 export async function fetchUsage(
   deps: ProviderDeps,
   signal: AbortSignal,
@@ -120,10 +130,17 @@ export async function fetchUsage(
   }
 
   if (response.status === 401) {
-    throw new ProviderFetchError("OpenCode Go API key rejected (401)", {
-      kind: "http",
-      status: 401,
-    });
+    const code = await readErrorCode(response);
+    throw new ProviderFetchError(
+      `OpenCode Go API key rejected (401${code ? `: ${code}` : ""})`,
+      { kind: "http", status: 401 },
+      {
+        actionRequired:
+          code === "api_key_expired"
+            ? "API key expired. Create a new key in OpenCode Console and reconnect."
+            : "API key rejected. Reconnect OpenCode Go with a valid key.",
+      },
+    );
   }
 
   if (response.status === 403) {

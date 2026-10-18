@@ -14,6 +14,10 @@ export interface ApiResponse {
   usage?: UsageData | null;
 }
 
+export interface ApiErrorResponse {
+  error?: { code?: string | null } | string | null;
+}
+
 export interface AuthProviderEntry {
   type?: string | null;
   key?: string | null;

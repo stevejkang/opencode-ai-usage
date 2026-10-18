@@ -1,5 +1,5 @@
 import { detect, fetchUsage, readApiKey } from "../../../src/providers/opencode-go/fetcher";
-import type { ProviderDeps } from "../../../src/types";
+import { ProviderFetchError, type ProviderDeps } from "../../../src/types";
 
 function createFakeDeps(overrides: Partial<ProviderDeps> = {}): ProviderDeps {
   return {
@@ -251,9 +251,47 @@ describe("fetchUsage", () => {
       fetch: mockFetch(401, { error: "unauthorized" }),
     });
 
-    await expect(fetchUsage(deps, new AbortController().signal)).rejects.toThrow(
-      "OpenCode Go API key rejected (401)",
+    const error = await fetchUsage(deps, new AbortController().signal).catch((e: unknown) => e);
+    expect(error).toBeInstanceOf(ProviderFetchError);
+    expect((error as ProviderFetchError).message).toBe("OpenCode Go API key rejected (401)");
+    expect((error as ProviderFetchError).actionRequired).toBe(
+      "API key rejected. Reconnect OpenCode Go with a valid key.",
     );
+  });
+
+  it("asks for a new key when the 401 reports an expired key", async () => {
+    const deps = createFakeDeps({
+      readFile: vi
+        .fn()
+        .mockReturnValue(
+          JSON.stringify({ "opencode-go": { type: "api", key: "sk-old" } }),
+        ) as unknown as ProviderDeps["readFile"],
+      fetch: mockFetch(401, {
+        error: { type: "authentication_error", code: "api_key_expired", message: "expired" },
+      }),
+    });
+
+    const error = await fetchUsage(deps, new AbortController().signal).catch((e: unknown) => e);
+    expect((error as ProviderFetchError).message).toBe(
+      "OpenCode Go API key rejected (401: api_key_expired)",
+    );
+    expect((error as ProviderFetchError).actionRequired).toBe(
+      "API key expired. Create a new key in OpenCode Console and reconnect.",
+    );
+  });
+
+  it("leaves rate limits recoverable without user action", async () => {
+    const deps = createFakeDeps({
+      readFile: vi
+        .fn()
+        .mockReturnValue(
+          JSON.stringify({ "opencode-go": { type: "api", key: "sk-test" } }),
+        ) as unknown as ProviderDeps["readFile"],
+      fetch: mockFetch(429, {}),
+    });
+
+    const error = await fetchUsage(deps, new AbortController().signal).catch((e: unknown) => e);
+    expect((error as ProviderFetchError).actionRequired).toBeNull();
   });
 
   it("returns empty windows on 403 (no subscription)", async () => {
