@@ -253,7 +253,36 @@ describe("fetchUsage", () => {
     const result = await fetchUsage(deps, new AbortController().signal);
     expect(result.accountKey).toBeNull();
     expect(result.profile).toBeNull();
+    expect(result.profileUnavailable).toBeUndefined();
     expect(child.kill).toHaveBeenCalled();
+  });
+
+  it("marks the profile unavailable when account/read returns an error", async () => {
+    const child = createFakeChild();
+    child.stdout.on("newListener", (event: string) => {
+      if (event !== "data") return;
+      queueMicrotask(() => {
+        child.stdout.emit("data", Buffer.from(initializeResponse()));
+        queueMicrotask(() => {
+          child.stdout.emit(
+            "data",
+            Buffer.from(
+              rateLimitsResponse({ primary: { usedPercent: 10, windowDurationMins: 300 } }) +
+                rpcLine({ id: 3, error: { code: -32603, message: "internal" } }),
+            ),
+          );
+        });
+      });
+    });
+    const deps = createFakeDeps({
+      spawn: vi.fn().mockReturnValue(child) as unknown as ProviderDeps["spawn"],
+    });
+
+    const result = await fetchUsage(deps, new AbortController().signal);
+    expect(result.accountKey).toBeNull();
+    expect(result.profile).toBeNull();
+    expect(result.profileUnavailable).toBe("rpc-error");
+    expect(result.windows).toHaveLength(1);
   });
 });
 
@@ -450,6 +479,7 @@ describe("profile grace period", () => {
     const result = await promise;
     expect(result.accountKey).toBeNull();
     expect(result.profile).toBeNull();
+    expect(result.profileUnavailable).toBe("grace-timeout");
     expect(result.windows).toHaveLength(1);
   });
 });

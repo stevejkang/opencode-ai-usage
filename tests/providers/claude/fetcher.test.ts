@@ -849,6 +849,7 @@ describe("fetchUsage", () => {
       const deps = makeDeps({ fetch: successFetch() });
       const result = await fetchUsage(deps, signal);
       expect(result.accountKey).toBe("user@test.com");
+      expect(result.profileUnavailable).toBeUndefined();
     });
 
     it("returns null accountKey when profile unavailable", async () => {
@@ -875,6 +876,7 @@ describe("fetchUsage", () => {
       const deps = makeDeps({ fetch: fetchFn });
       const result = await fetchUsage(deps, signal);
       expect(result.accountKey).toBeNull();
+      expect(result.profileUnavailable).toBe("profile-request-failed");
     });
   });
 });

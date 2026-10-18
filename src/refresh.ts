@@ -57,6 +57,7 @@ const MINUTE_MS = 60_000;
 const MAX_FAILURE_BACKOFF_MS = 15 * MINUTE_MS;
 const RATE_LIMIT_PROBE_CAP_MS = 15 * MINUTE_MS;
 const MAX_RATE_LIMIT_BACKOFF_MS = 60 * MINUTE_MS;
+const MAX_PROFILE_HOLDS = 3;
 
 function rateLimitRetryAfterMs(error: unknown): number | null {
   if (!(error instanceof ProviderFetchError)) return null;
@@ -143,6 +144,7 @@ export function createRefreshLoop(options: RefreshLoopOptions): RefreshLoopHandl
   let lastKnownAccountKey: string = UNKNOWN_ACCOUNT_KEY;
   let lastGoodState: RefreshState | null = null;
   let shownActionRequired: string | null = null;
+  let profileHolds = 0;
 
   const diag: RefreshDiagnostics = {
     phase: "fetching",
@@ -261,6 +263,22 @@ export function createRefreshLoop(options: RefreshLoopOptions): RefreshLoopHandl
     try {
       const result = await fetchWithRetry(provider, deps, signal, { setPhase, log });
       if (signal.aborted) return;
+
+      // Usage without its profile cannot be attributed to the account on screen, so it is
+      // held back rather than shown under the previous email or cached under the wrong key.
+      if (result.profileUnavailable && lastGoodState?.profile && profileHolds < MAX_PROFILE_HOLDS) {
+        profileHolds += 1;
+        log("cycle.profile_hold", {
+          provider: provider.id,
+          cycle: diag.cycles,
+          durationMs: deps.now() - startedAt,
+          reason: result.profileUnavailable,
+          profileHolds,
+        });
+        scheduleIn(intervalMs);
+        return;
+      }
+      profileHolds = 0;
 
       const accountKey = result.accountKey ?? UNKNOWN_ACCOUNT_KEY;
       lastKnownAccountKey = accountKey;

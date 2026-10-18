@@ -898,6 +898,133 @@ describe("multi-provider integration", () => {
     });
   });
 
+  describe("holding usage fetched without its profile", () => {
+    function createEventTracker() {
+      const counts = new Map<string, number>();
+      const waiters: { event: string; n: number; resolve: () => void }[] = [];
+      return {
+        log: (event: string) => {
+          const count = (counts.get(event) ?? 0) + 1;
+          counts.set(event, count);
+          for (const w of waiters.filter((w) => w.event === event && w.n === count)) {
+            waiters.splice(waiters.indexOf(w), 1);
+            w.resolve();
+          }
+        },
+        waitFor: (event: string, n: number): Promise<void> => {
+          if ((counts.get(event) ?? 0) >= n) return Promise.resolve();
+          return new Promise((resolve) => waiters.push({ event, n, resolve }));
+        },
+      };
+    }
+
+    function withProfile(percent: number): FetchResult<unknown> {
+      return {
+        accountKey: "user@x.com",
+        windows: makeWindows(percent),
+        profile: { email: "user@x.com" },
+        extras: null,
+      };
+    }
+
+    function withoutProfile(percent: number): FetchResult<unknown> {
+      return {
+        accountKey: null,
+        windows: makeWindows(percent),
+        profile: null,
+        extras: null,
+        profileUnavailable: "grace-timeout",
+      };
+    }
+
+    function startLoop(results: FetchResult<unknown>[]) {
+      const cache = createCacheStore({ cacheDir: tmpDir, now: () => Date.now() });
+      const fetchFn = vi.fn<ProviderDefinition["fetch"]>();
+      for (const r of results) fetchFn.mockResolvedValueOnce(r);
+      const tracker = createStateTracker();
+      const events = createEventTracker();
+      const ac = new AbortController();
+      createRefreshLoop({
+        provider: makeFakeProvider("test", fetchFn),
+        deps: makeFakeDeps({ now: () => Date.now() }),
+        cache,
+        signal: ac.signal,
+        intervalMs: 5_000,
+        setState: tracker.setState,
+        log: events.log,
+      });
+      return { cache, fetchFn, tracker, events, ac };
+    }
+
+    it("keeps the shown email and usage together and caches nothing until the profile returns", async () => {
+      vi.useFakeTimers({ now: FROZEN_NOW });
+      const { cache, tracker, events, ac } = startLoop([
+        withProfile(10),
+        withoutProfile(90),
+        withProfile(30),
+      ]);
+
+      await tracker.waitFor(1);
+      const cachedBefore = cache.read("test", "user@x.com");
+
+      await vi.advanceTimersByTimeAsync(5_000);
+      await events.waitFor("cycle.profile_hold", 1);
+
+      expect(tracker.calls).toHaveLength(1);
+      expect(cache.read("test", "user@x.com")).toEqual(cachedBefore);
+      expect(cache.read("test", UNKNOWN_ACCOUNT_KEY)).toBeNull();
+
+      await vi.advanceTimersByTimeAsync(5_000);
+      const next = await tracker.waitFor(2);
+
+      expect(next.profile).toEqual({ email: "user@x.com" });
+      expect(next.windows).toEqual(makeWindows(30));
+      expect(cache.read("test", "user@x.com")!.windows).toEqual(makeWindows(30));
+
+      ac.abort();
+    });
+
+    it("accepts usage without a profile after three consecutive holds", async () => {
+      vi.useFakeTimers({ now: FROZEN_NOW });
+      const { cache, tracker, events, ac } = startLoop([
+        withProfile(10),
+        withoutProfile(20),
+        withoutProfile(30),
+        withoutProfile(40),
+        withoutProfile(50),
+      ]);
+
+      await tracker.waitFor(1);
+      for (let hold = 1; hold <= 3; hold++) {
+        await vi.advanceTimersByTimeAsync(5_000);
+        await events.waitFor("cycle.profile_hold", hold);
+      }
+      expect(tracker.calls).toHaveLength(1);
+
+      await vi.advanceTimersByTimeAsync(5_000);
+      const accepted = await tracker.waitFor(2);
+
+      expect(accepted.profile).toBeNull();
+      expect(accepted.windows).toEqual(makeWindows(50));
+      expect(cache.read("test", UNKNOWN_ACCOUNT_KEY)!.windows).toEqual(makeWindows(50));
+
+      ac.abort();
+    });
+
+    it("accepts usage without a profile right away when no profile was shown before", async () => {
+      vi.useFakeTimers({ now: FROZEN_NOW });
+      const { cache, tracker, ac } = startLoop([withoutProfile(20)]);
+
+      const first = await tracker.waitFor(1);
+
+      expect(first.profile).toBeNull();
+      expect(first.windows).toEqual(makeWindows(20));
+      expect(cache.read("test", UNKNOWN_ACCOUNT_KEY)).not.toBeNull();
+
+      ac.abort();
+    });
+  });
+
   describe("cold-start seeding from email key (no __unknown__)", () => {
     it("seed emits setState with cached data before any fetch runs when cache has email key only", async () => {
       const cachedWindows = makeWindows(25, 60);

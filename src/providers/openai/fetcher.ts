@@ -75,6 +75,7 @@ export async function fetchUsage(
     let snapshot: RateLimitSnapshot | null = null;
     let profile: { email: string | null; planType: string | null } | null = null;
     let profileArrived = false;
+    let profileUnavailable: string | null = null;
     let profileGraceTimer: ReturnType<typeof setTimeout> | null = null;
 
     const PROFILE_GRACE_MS = 5_000;
@@ -82,11 +83,13 @@ export async function fetchUsage(
     const finalize = () => {
       const windows = snapshotToWindows(snapshot);
       const email = profile?.email ?? null;
+      const unavailable = profileArrived ? profileUnavailable : "grace-timeout";
       finish(resolve, {
         accountKey: email,
         windows,
         profile: profile ? { email: profile.email, plan: profile.planType } : null,
         extras: null,
+        ...(unavailable ? { profileUnavailable: unavailable } : {}),
       });
     };
 
@@ -139,7 +142,9 @@ export async function fetchUsage(
           settle();
         } else if (msg.id === 3) {
           profileArrived = true;
-          if (!msg.error) {
+          if (msg.error) {
+            profileUnavailable = "rpc-error";
+          } else {
             const account = (msg.result as AccountResponse | undefined)?.account;
             if (account?.type === "chatgpt" && account.email) {
               profile = {

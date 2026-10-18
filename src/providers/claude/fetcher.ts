@@ -302,5 +302,6 @@ function buildResult(
     windows: normalizeWindows(usage),
     profile: profile ? { email: profile.email, plan: profile.plan } : null,
     extras: buildExtras(usage),
+    ...(profile ? {} : { profileUnavailable: "profile-request-failed" }),
   };
 }

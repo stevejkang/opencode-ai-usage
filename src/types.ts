@@ -69,6 +69,12 @@ export interface FetchResult<TExtras = unknown> {
   windows: UsageWindow[];
   profile: ProviderProfile | null;
   extras: TExtras | null;
+  /**
+   * Why the account profile could not be obtained for this fetch. Set it only when the
+   * profile request failed, never when the provider confirmed there is no profile, so the
+   * refresh loop can hold back usage it cannot attribute to the previously shown account.
+   */
+  profileUnavailable?: string;
 }
 
 export interface ProviderDefinition<TExtras = unknown> {
