@@ -147,14 +147,11 @@ export function createCacheStore(deps: CacheStoreDeps = {}): CacheStore {
     });
   }
 
-  function migrateUnknown(providerId: string, newAccountKey: string): Promise<void> {
+  function discardUnknown(providerId: string): Promise<void> {
     return enqueue(async () => {
       const schema = await readSchemaAsync(cachePath);
       const provider = schema.providers[providerId];
-      if (!provider) return;
-      const unknownEntry = provider.accounts[UNKNOWN_ACCOUNT_KEY];
-      if (!unknownEntry) return;
-      provider.accounts[newAccountKey] = unknownEntry;
+      if (!provider?.accounts[UNKNOWN_ACCOUNT_KEY]) return;
       delete provider.accounts[UNKNOWN_ACCOUNT_KEY];
       await atomicWrite(schema);
     });
@@ -255,7 +252,7 @@ export function createCacheStore(deps: CacheStoreDeps = {}): CacheStore {
     readLatest,
     write,
     getAge,
-    migrateUnknown,
+    discardUnknown,
     getBackoff,
     setBackoff,
     tryAcquireFetchLock,

@@ -716,8 +716,8 @@ describe("multi-provider integration", () => {
     });
   });
 
-  describe("error-path state preservation after account-key migration", () => {
-    it("success→migrate→fail preserves windows+profile with error set and lastFetchedAt preserved", async () => {
+  describe("error-path state preservation after a known-account fetch", () => {
+    it("success→fail preserves windows+profile with error set and lastFetchedAt preserved", async () => {
       vi.useFakeTimers({ now: FROZEN_NOW });
 
       const cache = createCacheStore({ cacheDir: tmpDir, now: () => Date.now() });
@@ -849,8 +849,8 @@ describe("multi-provider integration", () => {
     });
   });
 
-  describe("__unknown__ to accountKey migration through refresh loop", () => {
-    it("first fetch with null accountKey caches under __unknown__ then second fetch migrates to real key", async () => {
+  describe("__unknown__ entry replaced by a known-account fetch", () => {
+    it("first fetch with null accountKey caches under __unknown__ then second fetch replaces it with the real key", async () => {
       vi.useFakeTimers({ now: FROZEN_NOW });
 
       const cache = createCacheStore({ cacheDir: tmpDir, now: () => Date.now() });

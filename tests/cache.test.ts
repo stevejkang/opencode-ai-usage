@@ -123,31 +123,33 @@ describe("createCacheStore", () => {
     expect(store.read("claude", "user@test.com")).toEqual(entry);
   });
 
-  it("migrateUnknown moves entry from __unknown__ to new key", async () => {
+  it("discardUnknown removes the __unknown__ entry without attributing it to an account", async () => {
     const store = createCacheStore({ cacheDir: tmpDir, now: () => frozenNow });
-    const entry = makeEntry({ timestamp: frozenNow });
+    const unknownEntry = makeEntry({ timestamp: frozenNow });
+    const knownEntry = makeEntry({ timestamp: frozenNow - 1_000 });
 
-    await store.write("claude", UNKNOWN_ACCOUNT_KEY, entry);
-    expect(store.read("claude", UNKNOWN_ACCOUNT_KEY)).toEqual(entry);
+    await store.write("claude", UNKNOWN_ACCOUNT_KEY, unknownEntry);
+    await store.write("claude", "user@real.com", knownEntry);
 
-    await store.migrateUnknown("claude", "user@real.com");
+    await store.discardUnknown("claude");
 
     expect(store.read("claude", UNKNOWN_ACCOUNT_KEY)).toBeNull();
-    expect(store.read("claude", "user@real.com")).toEqual(entry);
+    expect(store.read("claude", "user@real.com")).toEqual(knownEntry);
   });
 
-  it("migrateUnknown with no __unknown__ entry is a no-op", async () => {
+  it("discardUnknown with no __unknown__ entry is a no-op", async () => {
     const store = createCacheStore({ cacheDir: tmpDir, now: () => frozenNow });
 
-    await expect(store.migrateUnknown("claude", "user@test.com")).resolves.toBeUndefined();
+    await expect(store.discardUnknown("claude")).resolves.toBeUndefined();
   });
 
-  it("migrateUnknown with nonexistent provider is a no-op", async () => {
+  it("discardUnknown with nonexistent provider is a no-op", async () => {
     const store = createCacheStore({ cacheDir: tmpDir, now: () => frozenNow });
     const entry = makeEntry({ timestamp: frozenNow });
     await store.write("openai", "user@test.com", entry);
 
-    await expect(store.migrateUnknown("claude", "user@test.com")).resolves.toBeUndefined();
+    await expect(store.discardUnknown("claude")).resolves.toBeUndefined();
+    expect(store.read("openai", "user@test.com")).toEqual(entry);
   });
 
   if (process.platform !== "win32") {

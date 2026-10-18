@@ -284,7 +284,7 @@ export function createRefreshLoop(options: RefreshLoopOptions): RefreshLoopHandl
       lastKnownAccountKey = accountKey;
 
       if (result.accountKey !== null) {
-        await cache.migrateUnknown(provider.id, accountKey);
+        await cache.discardUnknown(provider.id);
       }
 
       const entry: AccountCache = {

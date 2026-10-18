@@ -147,7 +147,7 @@ export interface CacheStore {
   readLatest(providerId: string): { accountKey: string; entry: AccountCache } | null;
   write(providerId: string, accountKey: string, entry: AccountCache): Promise<void>;
   getAge(providerId: string, accountKey: string): number | null;
-  migrateUnknown(providerId: string, newAccountKey: string): Promise<void>;
+  discardUnknown(providerId: string): Promise<void>;
   getBackoff(providerId: string): FetchBackoff;
   setBackoff(providerId: string, backoff: FetchBackoff | null): Promise<void>;
   tryAcquireFetchLock(providerId: string, ttlMs: number): (() => void) | null;
